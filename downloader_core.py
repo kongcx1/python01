@@ -829,7 +829,16 @@ def build_client(
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
     session_base = str(session_path or (output_dir / "user_session"))
-    return TelegramClient(session_base, int(api_id), api_hash, loop=loop)
+    return TelegramClient(
+        session_base,
+        int(api_id),
+        api_hash,
+        loop=loop,
+        connection_retries=5,
+        retry_delay=2,
+        timeout=20,
+        auto_reconnect=True,
+    )
 
 
 async def download_videos(

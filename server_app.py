@@ -3153,6 +3153,24 @@ async def _with_client_retry(
     raise RuntimeError("æœªçŸ¥é”™è¯¯")
 
 
+def _is_retryable_telegram_disconnect(exc: Exception) -> bool:
+    text = str(exc).lower()
+    retry_markers = (
+        "server closed the connection",
+        "0 bytes read",
+        "connection reset",
+        "connection aborted",
+        "connection lost",
+        "disconnected",
+        "not connected",
+        "transport endpoint is not connected",
+        "cannot send requests while disconnected",
+    )
+    return isinstance(exc, (ConnectionError, OSError, EOFError)) or any(
+        marker in text for marker in retry_markers
+    )
+
+
 @app.post("/auth/send_code", dependencies=[Depends(_require_token)])
 async def send_login_code(req: LoginRequest) -> dict:
     api_id, api_hash = _resolve_telegram_credentials(req.api_id, req.api_hash)
@@ -3323,7 +3341,7 @@ async def preview_videos(req: PreviewRequest) -> dict:
     offset_id = req.offset_id
     max_scan_messages = max(100, min(500, limit * 10))
     try:
-        async def _do_list() -> object:
+        async def _do_list_once() -> object:
             common_kwargs = {
                 "channel": req.channel,
                 "output_dir": output_dir,
@@ -3347,6 +3365,21 @@ async def preview_videos(req: PreviewRequest) -> dict:
                 return_scan_limited=True,
                 client=client,
             )
+
+        async def _do_list() -> object:
+            last_exc: Optional[Exception] = None
+            for attempt in range(2):
+                try:
+                    return await _do_list_once()
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt >= 1 or not _is_retryable_telegram_disconnect(exc):
+                        raise
+                    await _close_preview_client()
+                    await asyncio.sleep(0.5)
+            if last_exc:
+                raise last_exc
+            raise RuntimeError("预览加载失败")
 
         items, next_offset_id, scan_limited = await asyncio.wait_for(
             _with_client_lock_async(_do_list),
