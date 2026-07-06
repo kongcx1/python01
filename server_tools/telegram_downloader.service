@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram Downloader Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/telegram_downloader
+Environment=SERVER_STATE_DIR=/opt/telegram_downloader/server_state
+Environment=SERVER_CONFIG=/opt/telegram_downloader/server_config.json
+ExecStart=/opt/telegram_downloader/.venv/bin/uvicorn server_app:app --host 0.0.0.0 --port 8787
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

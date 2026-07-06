@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Local IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Runtime state and secrets
+server_config.json
+server_state/
+downloads/
+*.session
+*.session-*
+*.log
+
+# Node / Vue
+telegram_download_admin_vue/node_modules/
+telegram_download_admin_vue/dist/
+
+# Build artifacts
+build/
+dist/
+*.zip
+*.dmg
+
+# Codex local workspace metadata
+.agents/
+.codex/

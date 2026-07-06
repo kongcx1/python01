@@ -1,0 +1,211 @@
+{
+  "news": [
+    {
+      "id": "news-1",
+      "title": {
+        "zh": "Kizuna 获得中国知名科技公司关注，并达成合作意向",
+        "ja": "Kizuna、中国大手テック企業の注目を集め、協業に向けた基本合意に到達",
+        "en": "Kizuna Attracts Attention from a Leading Chinese Tech Company and Reaches Cooperation Intent"
+      },
+      "body": {
+        "zh": "近日，新一代真实社交平台 Kizuna 宣布，已获得中国某知名科技公司的高度关注，并就未来在产品技术、生态建设及市场拓展等多个层面展开深入交流，双方已达成初步合作意向。\n\n该中国科技公司在互联网产品研发、内容生态及用户运营领域拥有丰富经验，旗下多款产品在亚洲市场拥有广泛用户基础。此次关注 Kizuna，源于其对“真实社交”与“高质量连接”趋势的持续关注。双方在产品理念与发展方向上高度一致，均认为未来的社交平台将更加重视身份可信度、关系有效性以及用户体验的长期价值。\n\nKizuna 自启动以来，始终围绕「真人认证、真实定位、反诈骗风控」等核心机制进行产品设计，致力于打造一个更加可信、安全且高效的社交环境。本次获得中国科技公司的认可，也进一步验证了 Kizuna 在产品方向与技术路径上的前瞻性。\n\n根据双方目前的沟通成果，未来将围绕技术能力协同、产品形态优化、用户增长模式及跨区域市场拓展等方向展开更深入的合作探索，并在合适的阶段推进更具体的合作项目。\n\nKizuna 团队表示，未来将继续坚持以「真实连接」为核心理念，稳步推进在日本及海外华人市场的布局，同时积极引入更多产业合作伙伴，共同构建新一代值得信赖的社交基础设施。",
+        "ja": "次世代リアルソーシャルプラットフォーム Kizuna はこのたび、中国の大手テック企業より高い関心を寄せられ、プロダクト技術、エコシステム構築、市場展開など複数の分野において協議を行い、協業に向けた基本合意に達したことを発表しました。\n\n当該中国テック企業は、インターネットプロダクト開発、コンテンツエコシステム、ユーザー運営において豊富な実績を持ち、アジア市場において多数のユーザー基盤を有しています。今回の協議は、「リアルなつながり」と「高品質なソーシャル体験」という価値観への共通認識を背景に実現しました。\n\nKizuna は、サービス開始以来、「本人認証」「位置情報の信頼性」「不正・詐欺対策」といった仕組みを中核に、安心・安全で信頼できるソーシャル環境の構築に取り組んできました。今回の評価は、同社のプロダクト方針と技術戦略の妥当性を裏付けるものとなります。\n\n今後、両社は技術連携、プロダクト高度化、ユーザー成長戦略、クロスボーダー展開などの分野で、より具体的な協業の可能性を検討していく予定です。\n\nKizuna は今後も「リアルなつながり」を中核理念として、日本および海外華人市場を中心に事業展開を進めるとともに、より多くのパートナーとの連携を通じて、新しいソーシャルインフラの構築を目指してまいります。",
+        "en": "Kizuna, a next-generation social platform focused on real and trustworthy connections, announced today that it has attracted strong interest from a leading Chinese technology company. The two parties have conducted in-depth discussions on product technology, ecosystem development, and market expansion, and have reached an initial cooperation intent.\n\nThe Chinese tech company has extensive experience in internet product development, content ecosystems, and user operations, with a large user base across Asian markets. The engagement with Kizuna is driven by a shared belief in the future of “authentic social connections” and “high-quality relationships,” as well as a common vision for building more reliable and meaningful social platforms.\n\nSince its launch, Kizuna has been focusing on core mechanisms such as real-person verification, trusted location systems, and anti-fraud risk control, aiming to build a safer, more credible, and more efficient social environment. The recognition from the Chinese tech company further validates Kizuna’s product direction and long-term strategy.\n\nAccording to the current discussions, both parties plan to further explore cooperation opportunities in areas including technology collaboration, product optimization, user growth strategies, and cross-border market expansion.\n\nKizuna stated that it will continue to uphold its mission of “connecting people in a real way,” steadily expanding in the Japanese and overseas Chinese markets, while actively engaging with more industry partners to build a new generation of trustworthy social infrastructure."
+      }
+    },
+    {
+      "id": "news-2",
+      "title": {
+        "zh": "Kizuna 团队完成阶段性组织搭建，进入产品与运营并行推进阶段",
+        "ja": "Kizuna、組織体制のフェーズ構築を完了し、プロダクト開発と運営を並行推進する体制へ",
+        "en": "Kizuna Completes Initial Team Structure and Enters Parallel Development and Operations Phase"
+      },
+      "body": {
+        "zh": "随着核心成员陆续到位，Kizuna 近日完成了产品、技术、设计、运营与风控等基础团队结构搭建。 团队将以东京为业务与产品中心，同时保持跨区域协作机制，为未来的多语言、多市场版本提前做好组织准备。 给我日英两个版本的",
+        "ja": "Kizuna はこのたび、コアメンバーの参画が順調に進み、プロダクト、エンジニアリング、デザイン、運営、リスクコントロールなどの基盤チーム体制の構築を完了したことを発表しました。\n\n今後は東京をビジネスおよびプロダクト開発の拠点としつつ、クロスリージョンでの協業体制を維持し、将来的な多言語・複数市場展開に向けた組織基盤の整備を進めてまいります。",
+        "en": "With the core team members now in place, Kizuna has recently completed the formation of its foundational teams, covering product, engineering, design, operations, and risk control.\n\nMoving forward, Tokyo will serve as the central hub for business and product development, while the team will continue to operate in a cross-regional collaboration model, laying the organizational foundation for future multi-language and multi-market expansion."
+      }
+    },
+    {
+      "id": "news-3",
+      "title": {
+        "zh": "真人视频认证机制全面上线",
+        "ja": "本人動画認証を全面導入",
+        "en": "Video verification rolls out"
+      },
+      "body": {
+        "zh": "视频+真人核验双重流程，减少虚假账号与骚扰行为。",
+        "ja": "動画と本人確認でなりすましや迷惑行為を抑止します。",
+        "en": "Dual verification reduces fake accounts and harassment."
+      }
+    },
+    {
+      "id": "news-4",
+      "title": {
+        "zh": "Kizuna 启动日本市场本地化调研，聚焦真实使用场景",
+        "ja": "Kizuna、日本市場向けローカライズ調査を開始。実際の利用シーンにフォーカス",
+        "en": "Kizuna Launches Localization Research for the Japanese Market, Focusing on Real Usage Scenarios"
+      },
+      "body": {
+        "zh": "为了更好地服务日本本地用户，Kizuna 近期正式启动了针对日本市场的本地化专项调研计划，重点围绕日本用户的社交习惯、使用心理与安全意识展开系统性研究。\n\n本次调研将从多个维度深入了解日本用户在使用社交产品时的真实需求与顾虑，主要包括：\n\n交友方式与社交动机的差异\n\n对个人隐私与信息披露的敏感程度\n\n对陌生人社交的心理门槛与信任建立过程\n\n对实名制、认证机制以及安全措施的接受程度与期待\n\n对线上社交与线下见面的转换意愿与顾虑\n\n除了问卷调研外，Kizuna 团队还将结合访谈、使用场景分析以及竞品体验研究等多种方式，力求更立体地理解日本用户的真实使用场景，而不是仅仅停留在数据层面的判断。\n\n团队表示，日本市场在社交文化、隐私观念以及对陌生人关系的态度上，与其他地区存在明显差异，因此简单复制其他市场的产品形态并不可取。Kizuna 希望通过前期充分调研，在产品机制与交互细节上做出真正符合本地用户心理预期的设计。\n\n本次调研的结论将直接影响产品在日本市场的功能优先级排序、核心机制设计以及整体交互体验方向，为后续版本迭代提供重要决策依据。\n\nKizuna 团队表示，在进入市场之前，宁可慢一点，也要先把“理解用户”这件事做扎实。",
+        "ja": "Kizuna は、日本のユーザーにより良いサービスを提供するため、日本市場向けのローカライズに関する専門調査プロジェクトをこのたび正式に開始しました。本調査では、日本のユーザーのソーシャルサービス利用習慣、利用時の心理、そして安全意識について多角的な分析を行います。\n\n調査内容は、以下のような観点を中心に進められます。\n\n交友スタイルやソーシャル利用の動機\n\n個人情報の開示に対する感度やプライバシー意識\n\n見知らぬ相手とのコミュニケーションに対する心理的ハードル\n\n本人確認・認証制度および安全対策に対する受容度と期待\n\nオンラインからオフラインへの関係移行に対する意識と不安要素\n\n本調査では、アンケート調査に加え、ユーザーインタビュー、利用シーン分析、競合サービスの体験調査なども組み合わせ、単なる数値データにとどまらない、より立体的なユーザー理解を目指しています。\n\nKizuna チームは、日本市場におけるソーシャル文化やプライバシー意識、対人距離感は他地域とは大きく異なると認識しており、他市場のプロダクトモデルをそのまま適用するのではなく、日本のユーザー心理に即したプロダクト設計を重視しています。\n\n本調査の結果は、日本市場向けプロダクトにおける機能の優先順位、コアメカニズムの設計、ならびに全体的なユーザー体験の方向性に直接反映される予定です。\n\nKizuna は、「市場に入る前に、まずユーザーを深く理解する」という方針のもと、着実に準備を進めてまいります。",
+        "en": "To better serve users in Japan, Kizuna has officially launched a dedicated localization research initiative for the Japanese market. This project aims to conduct a comprehensive study of local users’ social habits, usage psychology, and attitudes toward safety and trust.\n\nThe research focuses on multiple key aspects, including:\n\nSocial and dating behaviors and underlying motivations\n\nSensitivity toward privacy and personal information disclosure\n\nPsychological barriers to interacting with strangers\n\nAcceptance and expectations regarding real-name verification and safety mechanisms\n\nAttitudes and concerns about transitioning from online interactions to offline meetings\n\nIn addition to surveys, the Kizuna team will conduct user interviews, usage scenario analysis, and hands-on reviews of existing services to build a more comprehensive and nuanced understanding beyond quantitative data alone.\n\nThe team believes that social culture, privacy awareness, and interpersonal distance in Japan differ significantly from other markets. Rather than simply replicating existing product models, Kizuna aims to design its product based on a deep understanding of local user expectations and behaviors.\n\nThe findings from this research will directly influence feature prioritization, core mechanism design, and overall user experience direction for the Japanese version of the product.\n\nKizuna stated that it would rather move a little slower in the early stages to ensure it truly understands users before entering the market."
+      }
+    }
+  ],
+  "jobs": [
+    {
+      "id": "engineering",
+      "title": {
+        "zh": "项目开发部",
+        "ja": "プロジェクト開発部",
+        "en": "Project Development Department"
+      },
+      "desc": {
+        "zh": "",
+        "ja": "",
+        "en": ""
+      },
+      "roles": [
+        {
+          "id": "role-android",
+          "title": {
+            "zh": "App 前端开发工程师",
+            "ja": "アプリフロントエンド開発エンジニア",
+            "en": "Mobile Frontend Engineer"
+          },
+          "location": {
+            "zh": "东京",
+            "ja": "東京",
+            "en": "Tokyo"
+          },
+          "desc": {
+            "zh": "🧑‍💻 招聘岗位：App 前端开发工程师（Mobile Frontend Engineer）\n📍 工作地点\n\n日本 · 东京（可协商远程 / 混合办公）\n\n💰 薪资待遇\n\n月薪：20,000 – 50,000 RMB（可谈）\n\n13 薪 / 项目奖金 / 绩效奖金（视个人能力）\n\n核心成员可提供：期权 / 股权激励\n\n根据技术能力与经验提供具有竞争力的待遇\n\n🕘 工作时间\n\n周一至周五：10:00 – 19:00（含午休）\n\n双休，法定节假日正常休息\n\n支持弹性工作制 / 部分远程办公（视团队协作安排）\n\n📌 岗位职责（工作内容）\n\n负责公司社交类 App（iOS / Android / 跨端）的前端开发与维护\n\n根据产品需求，完成 App 界面开发、功能实现与交互优化\n\n与产品经理、后端工程师、设计师紧密协作，推动功能高质量落地\n\n持续优化产品性能、稳定性与用户体验\n\n参与技术方案设计、代码评审与技术选型\n\n参与产品从 0 到 1 及后续快速迭代过程\n\n📌 任职要求\n\n本科及以上学历，计算机相关专业优先（能力优秀者不限）\n\n2 年以上移动端 / 前端开发经验，有完整项目经验\n\n熟练掌握以下至少一种技术栈：\n\nReact Native / Flutter / iOS / Android / UniApp 等\n\n熟悉常见前端架构设计、组件化开发、性能优化\n\n具备良好的代码规范意识与工程习惯\n\n有已上线 App 或复杂业务项目经验者优先\n\n有社交、电商、内容类产品经验者优先\n\n⭐ 加分项\n\n有从 0 到 1 的产品搭建经验\n\n有跨端框架（Flutter / RN）深度经验\n\n有高并发或复杂业务系统经验\n\n有良好的产品意识或用户体验意识\n\n🎁 福利待遇\n\n按日本当地制度缴纳社会保险（或可协商）\n\n带薪年假\n\n工作签证支持（可协助办理）\n\n技术成长空间大，核心模块参与权\n\n扁平化团队，参与核心产品决策\n\n🚀 关于我们\n\n我们正在打造一款面向日本及海外华人市场的新一代真实社交产品，以：\n\n「真实身份 · 真实位置 · 反诈骗风控 · 高效连接」\n\n为核心理念，致力于构建一个更加可信、安全、高效的社交平台。团队规模精简，工程师直接参与核心架构与产品形态设计，非常适合希望真正参与打造一款长期产品的工程师加入。",
+            "ja": "📍 勤務地\n\n日本・東京（リモート／ハイブリッド勤務応相談）\n\n💰 給与・待遇\n\n月給：20,000 ～ 50,000 RMB（経験・能力により応相談）\n\n賞与／プロジェクトボーナス／成果報酬あり\n\nコアメンバーには ストックオプション・株式インセンティブ制度 あり\n\n能力・経験に応じて業界水準以上の待遇を提供\n\n🕘 勤務時間\n\n平日：10:00 ～ 19:00（休憩時間含む）\n\n完全週休2日制、祝日休み\n\nフレックスタイム制／一部リモート勤務可（チーム状況により）\n\n📌 業務内容\n\nソーシャル系アプリ（iOS / Android / クロスプラットフォーム）のフロントエンド開発\n\nプロダクト要件に基づいたUI実装、機能開発、UX改善\n\nプロダクトマネージャー、バックエンド、デザイナーと連携し開発を推進\n\nパフォーマンス、安定性、ユーザー体験の継続的な改善\n\n技術設計、コードレビュー、技術選定への参加\n\nプロダクトの0→1および継続的な改善フェーズに参画\n\n📌 応募要件\n\n大卒以上（相当のスキルがあれば学歴不問）\n\nモバイル／フロントエンド開発経験2年以上\n\n以下のいずれかの技術スタックに精通している方：\n\nReact Native / Flutter / iOS / Android / UniApp など\n\nフロントエンドアーキテクチャ、コンポーネント設計、パフォーマンス最適化の理解\n\n良好なコーディング習慣とエンジニアリング意識をお持ちの方\n\n実際にリリースされたアプリの開発経験がある方は尚可\n\nソーシャル、EC、コンテンツ系プロダクト経験者歓迎\n\n⭐ 歓迎スキル\n\n0→1プロダクト立ち上げ経験\n\nFlutter / React Native の深い実務経験\n\n複雑な業務システムや高トラフィック環境の開発経験\n\nUI / UX への理解・関心\n\n🎁 福利厚生\n\n日本の社会保険制度対応（または応相談）\n\n有給休暇\n\n就労ビザサポートあり\n\nコアメンバーとしてプロダクト中核に関われる環境\n\nフラットなチーム、意思決定スピードが速い\n\n🚀 会社について\n\n当社は、日本および海外華人市場向けに、\n「リアルで信頼できる次世代ソーシャルアプリ」 を開発しています。\n\n本人認証・実在位置・詐欺対策・高効率なマッチング\nを中核コンセプトに、安心・安全で価値あるつながりを提供することを目指しています。",
+            "en": "📍 Location\n\nTokyo, Japan (Remote / Hybrid negotiable)\n\n💰 Salary & Benefits\n\nMonthly Salary: 20,000 – 50,000 RMB (Negotiable)\n\nPerformance bonus / Project bonus\n\nStock options or equity incentives for core members\n\nCompetitive compensation based on experience and skills\n\n🕘 Working Hours\n\nMonday to Friday: 10:00 – 19:00\n\nWeekends off, public holidays off\n\nFlexible working hours / Partial remote work available\n\n📌 Responsibilities\n\nDevelop and maintain social apps (iOS / Android / Cross-platform)\n\nImplement UI, features, and improve user experience based on product requirements\n\nWork closely with PMs, backend engineers, and designers\n\nContinuously optimize performance, stability, and UX\n\nParticipate in technical design, code review, and technology decisions\n\nJoin the product from 0 to 1 and ongoing rapid iteration phases\n\n📌 Requirements\n\nBachelor’s degree or equivalent practical experience\n\nAt least 2 years of experience in frontend / mobile development\n\nProficient in at least one of the following:\n\nReact Native / Flutter / iOS / Android / UniApp, etc.\n\nFamiliar with frontend architecture, component-based development, and performance optimization\n\nGood coding habits and strong engineering mindset\n\nExperience with published apps or complex products is a plus\n\nExperience in social / e-commerce / content products is a plus\n\n⭐ Nice to Have\n\nExperience building products from 0 to 1\n\nDeep experience with Flutter or React Native\n\nExperience with high-traffic or complex business systems\n\nStrong sense of product and user experience\n\n🎁 Benefits\n\nSocial insurance support in Japan (or negotiable)\n\nPaid holidays\n\nWork visa support\n\nOpportunity to work on core modules of a growing product\n\nFlat team structure, fast decision-making\n\n🚀 About Us\n\nWe are building a next-generation social app focused on real and trustworthy connections, targeting the Japanese and overseas Chinese markets.\n\nOur core values are:\n\nReal identity · Real location · Anti-fraud system · Efficient connections\n\nWe aim to create a safer, more reliable, and more meaningful social platform."
+          }
+        },
+        {
+          "id": "role-ios",
+          "title": {
+            "zh": "服务端开发工程师",
+            "ja": "バックエンドエンジニア / サーバーサイドエンジニア",
+            "en": "Backend Engineer / Server-side Engineer"
+          },
+          "location": {
+            "zh": "东京",
+            "ja": "東京",
+            "en": "Tokyo"
+          },
+          "desc": {
+            "zh": "📍 工作地点\n\n日本 · 东京（可协商远程 / 混合办公）\n\n💰 薪资待遇\n\n月薪：20,000 – 50,000 RMB（可谈）\n\n项目奖金 / 绩效奖金\n\n核心成员可提供：期权 / 股权激励\n\n根据能力与经验提供有竞争力的待遇\n\n🕘 工作时间\n\n周一至周五：10:00 – 19:00\n\n双休，法定节假日休息\n\n支持弹性工作制 / 部分远程办公\n\n📌 岗位职责（工作内容）\n\n负责公司社交类产品的服务端系统设计、开发与维护\n\n参与整体系统架构设计，搭建稳定、高可用、可扩展的后端服务\n\n负责接口设计、数据库设计及性能优化\n\n与前端、产品、设计团队紧密协作，推动功能落地\n\n参与技术选型、代码评审及系统重构\n\n保障系统的安全性、稳定性和可维护性\n\n参与产品从 0 到 1 以及后续快速迭代过程\n\n📌 任职要求\n\n本科及以上学历，计算机相关专业优先（能力优秀者不限）\n\n3 年以上服务端 / 后端开发经验\n\n熟练掌握至少一种后端语言：\n\nJava / Go / Python / Node.js / PHP 等\n\n熟悉常见 Web 架构、RESTful API 设计\n\n熟悉 MySQL / PostgreSQL / Redis 等常用数据库\n\n对系统性能、并发处理、安全性有实践经验\n\n有实际线上项目经验，能独立负责模块开发\n\n⭐ 加分项\n\n有高并发、大规模系统经验\n\n有微服务 / 分布式系统经验\n\n有云服务（AWS / GCP / 阿里云 / 腾讯云）使用经验\n\n有社交、电商、内容类产品经验\n\n🎁 福利待遇\n\n按日本当地制度缴纳社会保险（或可协商）\n\n带薪年假\n\n工作签证支持\n\n核心模块参与权\n\n扁平化团队，技术决策参与度高\n\n🚀 关于我们\n\n我们正在打造一款面向日本及海外华人市场的新一代真实社交产品，以：\n\n真实身份 · 真实位置 · 反诈骗风控 · 高效连接\n\n为核心理念，构建可信、安全、可持续发展的社交平台。",
+            "ja": "📍 勤務地\n\n日本・東京（リモート／ハイブリッド勤務応相談）\n\n💰 給与\n\n月給：20,000 ～ 50,000 RMB（経験・能力により応相談）\n\n賞与・成果報酬あり\n\nコアメンバー向けストックオプション制度あり\n\n🕘 勤務時間\n\n平日：10:00 ～ 19:00\n\n完全週休2日制、祝日休み\n\nフレックスタイム／一部リモート可\n\n📌 業務内容\n\nソーシャルアプリのサーバーサイドシステムの設計・開発・運用\n\n高可用・高拡張性を考慮したアーキテクチャ設計への参画\n\nAPI設計、データベース設計、パフォーマンスチューニング\n\nフロントエンド、PM、デザイナーと連携した開発推進\n\n技術選定、コードレビュー、リファクタリング\n\nセキュリティ・安定性・保守性の担保\n\n0→1 フェーズおよび継続改善フェーズへの参画\n\n📌 応募要件\n\n大卒以上（または同等のスキル）\n\nサーバーサイド開発経験3年以上\n\nJava / Go / Python / Node.js / PHP などのいずれかに精通\n\nWebアプリケーションアーキテクチャ、API設計の知識\n\nMySQL / PostgreSQL / Redis などの利用経験\n\nパフォーマンス・スケーラビリティを意識した開発経験\n\n実運用サービスの開発経験\n\n⭐ 歓迎スキル\n\n大規模・高負荷システムの開発経験\n\nマイクロサービス・分散システムの経験\n\nクラウド（AWS / GCP / Azure 等）の利用経験\n\nソーシャル／コンテンツ系プロダクト経験\n\n🎁 福利厚生\n\n社会保険完備（または応相談）\n\n有給休暇\n\n就労ビザサポート\n\nコア機能開発への深い関与\n\nフラットな開発組織",
+            "en": "📍 Location\n\nTokyo, Japan (Remote / Hybrid negotiable)\n\n💰 Salary\n\nMonthly Salary: 20,000 – 50,000 RMB (Negotiable)\n\nPerformance / Project bonus\n\nStock options or equity incentives for core members\n\n🕘 Working Hours\n\nMonday to Friday: 10:00 – 19:00\n\nWeekends and public holidays off\n\nFlexible working hours / Partial remote available\n\n📌 Responsibilities\n\nDesign, develop, and maintain backend systems for social applications\n\nParticipate in system architecture design for scalability and high availability\n\nDesign APIs and databases, and optimize performance\n\nWork closely with frontend engineers, PMs, and designers\n\nParticipate in technical decisions, code reviews, and refactoring\n\nEnsure system security, stability, and maintainability\n\nJoin the product from 0 to 1 and continuous iteration phases\n\n📌 Requirements\n\nBachelor’s degree or equivalent experience\n\nAt least 3 years of backend / server-side development experience\n\nProficient in at least one of: Java, Go, Python, Node.js, PHP, etc.\n\nFamiliar with web architectures and RESTful API design\n\nExperience with MySQL / PostgreSQL / Redis or similar databases\n\nExperience with performance optimization and scalable systems\n\nExperience in production-level systems\n\n⭐ Nice to Have\n\nExperience with high-concurrency or large-scale systems\n\nExperience with microservices or distributed systems\n\nExperience with cloud services (AWS / GCP / Azure, etc.)\n\nExperience with social, content, or e-commerce products\n\n🎁 Benefits\n\nSocial insurance support in Japan (or negotiable)\n\nPaid holidays\n\nWork visa support\n\nCore system ownership and growth opportunities\n\nFlat team structure, fast decision-making"
+          }
+        },
+        {
+          "id": "role-ml",
+          "title": {
+            "zh": "UI 设计师",
+            "ja": "UIデザイナー",
+            "en": "UI Designer"
+          },
+          "location": {
+            "zh": "东京",
+            "ja": "東京",
+            "en": "Tokyo"
+          },
+          "desc": {
+            "zh": "📍 工作地点\n\n日本 · 东京（可协商远程 / 混合办公）\n\n💰 薪资待遇\n\n月薪：20,000 – 50,000 RMB（可谈）\n\n项目奖金 / 绩效奖金\n\n核心成员可提供：期权 / 股权激励\n\n根据能力与经验提供有竞争力的待遇\n\n🕘 工作时间\n\n周一至周五：10:00 – 19:00\n\n双休，法定节假日休息\n\n支持弹性工作制 / 部分远程办公\n\n📌 岗位职责（工作内容）\n\n负责公司社交类 App 的 UI 视觉设计与体验设计\n\n参与产品整体视觉风格制定，输出高质量界面设计方案\n\n与产品经理、前端工程师紧密合作，推动设计落地\n\n负责 App 界面、组件、交互细节的设计与规范制定\n\n持续优化产品视觉体验与用户体验\n\n参与产品从 0 到 1 以及持续迭代过程\n\n📌 任职要求\n\n本科及以上学历，设计相关专业优先（能力优秀者不限）\n\n2 年以上 UI / App 设计经验，有完整项目经验\n\n熟练使用 Figma / Sketch / Adobe XD / Photoshop 等设计工具\n\n有良好的视觉设计基础与交互理解能力\n\n对用户体验敏感，关注细节与整体一致性\n\n有已上线 App 或互联网产品作品集\n\n有社交 / 内容 / 工具类产品经验者优先\n\n⭐ 加分项\n\n有从 0 到 1 产品设计经验\n\n有设计系统 / 组件库经验\n\n懂基础前端实现逻辑者优先\n\n有海外产品 / 国际化产品经验\n\n🎁 福利待遇\n\n按日本当地制度缴纳社会保险（或可协商）\n\n带薪年假\n\n工作签证支持\n\n核心产品设计参与权\n\n扁平化团队，参与产品方向决策\n\n🚀 关于我们\n\n我们正在打造一款面向日本及海外华人市场的新一代真实社交产品，以：\n\n真实身份 · 真实位置 · 反诈骗风控 · 高效连接\n\n为核心理念，打造一个更可信、更安全、更高效的社交平台。",
+            "ja": "📍 勤務地\n\n日本・東京（リモート／ハイブリッド勤務応相談）\n\n💰 給与\n\n月給：20,000 ～ 50,000 RMB（経験・能力により応相談）\n\n成果報酬・プロジェクトボーナスあり\n\nコアメンバー向けストックオプション制度あり\n\n🕘 勤務時間\n\n平日：10:00 ～ 19:00\n\n完全週休2日制、祝日休み\n\nフレックスタイム／一部リモート可\n\n📌 業務内容\n\nソーシャルアプリのUI・ビジュアルデザイン全般\n\nプロダクト全体のデザイン方針・トーンの設計\n\nPM・エンジニアと連携し、デザインの実装を推進\n\n画面設計、コンポーネント、UIガイドラインの整備\n\nUX・ビジュアルの継続的な改善\n\n0→1フェーズおよび継続改善フェーズへの参画\n\n📌 応募要件\n\nデザイン関連学科卒または同等のスキル\n\nUI / アプリデザイン経験2年以上\n\nFigma / Sketch / Adobe XD / Photoshop 等の使用経験\n\nビジュアルデザインおよびUXへの理解\n\n実サービスのデザイン実績（ポートフォリオ必須）\n\nソーシャル／コンテンツ系プロダクト経験者歓迎\n\n⭐ 歓迎スキル\n\nデザインシステム構築経験\n\n0→1 プロダクトデザイン経験\n\nフロントエンドへの基本的な理解\n\nグローバル向けプロダクト経験\n\n🎁 福利厚生\n\n社会保険完備（または応相談）\n\n有給休暇\n\n就労ビザサポート\n\nコアデザイン領域への深い関与\n\nフラットなチーム文化",
+            "en": "📍 Location\n\nTokyo, Japan (Remote / Hybrid negotiable)\n\n💰 Salary\n\nMonthly Salary: 20,000 – 50,000 RMB (Negotiable)\n\nPerformance / Project bonus\n\nStock options or equity incentives for core members\n\n🕘 Working Hours\n\nMonday to Friday: 10:00 – 19:00\n\nWeekends and public holidays off\n\nFlexible working hours / Partial remote available\n\n📌 Responsibilities\n\nDesign UI and visual experience for social apps\n\nDefine and maintain overall design style and visual consistency\n\nWork closely with PMs and engineers to ensure design implementation\n\nDesign screens, components, and UI guidelines\n\nContinuously improve UX and visual quality\n\nParticipate in the product from 0 to 1 and continuous iterations\n\n📌 Requirements\n\nBachelor’s degree in design or equivalent experience\n\nAt least 2 years of UI / app design experience\n\nProficient in Figma, Sketch, Adobe XD, Photoshop, etc.\n\nStrong sense of visual design and user experience\n\nPortfolio of shipped products required\n\nExperience with social / content products is a plus\n\n⭐ Nice to Have\n\nExperience building design systems\n\nExperience designing products from 0 to 1\n\nBasic understanding of frontend development\n\nExperience with global or cross-border products\n\n🎁 Benefits\n\nSocial insurance support in Japan (or negotiable)\n\nPaid holidays\n\nWork visa support\n\nOwnership of core product design\n\nFlat team structure, fast decision-making"
+          }
+        },
+        {
+          "id": "role-data",
+          "title": {
+            "zh": "产品经理",
+            "ja": "プロダクトマネージャー",
+            "en": "Product Manager"
+          },
+          "location": {
+            "zh": "东京",
+            "ja": "東京",
+            "en": "Tokyo"
+          },
+          "desc": {
+            "zh": "📍 工作地点\n\n日本 · 东京（可协商远程 / 混合办公）\n\n💰 薪资待遇\n\n月薪：20,000 – 50,000 RMB（可谈）\n\n项目奖金 / 绩效奖金\n\n核心成员可提供：期权 / 股权激励\n\n根据能力与经验提供有竞争力的待遇\n\n🕘 工作时间\n\n周一至周五：10:00 – 19:00\n\n双休，法定节假日休息\n\n支持弹性工作制 / 部分远程办公\n\n📌 岗位职责（工作内容）\n\n负责公司社交类 App 的产品规划、功能设计与迭代推进\n\n根据公司战略与业务目标，制定产品路线图（Roadmap）\n\n深入理解用户需求，输出 PRD、原型、产品方案说明\n\n与设计师、前端、后端工程师紧密协作，推动产品落地\n\n跟进项目进度，协调资源，确保产品按时高质量上线\n\n通过数据分析和用户反馈，持续优化产品体验与转化效率\n\n参与产品从 0 到 1 的构建，以及后续的快速迭代\n\n📌 任职要求\n\n本科及以上学历（能力优秀者不限）\n\n2 年以上互联网 / 移动端产品经理经验\n\n有完整产品经验，至少参与过一个上线项目\n\n熟练使用 Axure / Figma / 墨刀 / Sketch 等产品设计工具\n\n具备良好的需求分析能力、逻辑能力和文档能力\n\n具备较强的沟通协调能力与项目推动能力\n\n对用户体验敏感，有产品思维与商业意识\n\n⭐ 加分项（非常加分）\n\n有社交 / 内容 / 社区 / 工具类产品经验\n\n有从 0 到 1 的产品搭建经验\n\n有海外产品 / 国际化产品经验\n\n有数据分析能力或增长产品经验\n\n有创业公司 / 小团队经验\n\n🎁 福利待遇\n\n按日本当地制度缴纳社会保险（或可协商）\n\n带薪年假\n\n工作签证支持\n\n深度参与产品方向与核心决策\n\n扁平化团队，决策链路短，成长空间大\n\n🚀 关于我们\n\n我们正在打造一款面向日本及海外华人市场的：\n\n新一代真实社交产品\n核心理念：真实身份 · 真实位置 · 反诈骗风控 · 高效连接\n\n产品目前处于关键发展阶段，产品经理将作为核心角色，直接参与产品方向设计与形态定义。",
+            "ja": "📍 勤務地\n\n日本・東京（リモート／ハイブリッド勤務応相談）\n\n💰 給与\n\n月給：20,000 ～ 50,000 RMB（経験・能力により応相談）\n\n成果報酬・プロジェクトボーナスあり\n\nコアメンバー向けストックオプション／株式インセンティブ制度あり\n\n経験・スキルに応じて業界水準以上の待遇を提供\n\n🕘 勤務時間\n\n平日：10:00 ～ 19:00\n\n完全週休2日制、祝日休み\n\nフレックスタイム／一部リモート可\n\n📌 業務内容\n\nソーシャルアプリのプロダクト企画、機能設計、ロードマップ策定\n\nユーザー課題・事業目標に基づいた要件定義、PRD作成、プロトタイプ設計\n\nデザイナー、フロントエンド、バックエンドと連携し開発を推進\n\nプロジェクト進行管理、リリース管理、品質コントロール\n\nデータ分析やユーザーフィードバックをもとに継続的な改善を実施\n\nプロダクトの 0→1 フェーズおよび継続的なグロースフェーズに参画\n\n📌 応募要件\n\n大卒以上、または同等のスキル・経験\n\nプロダクトマネージャーまたは類似職種の経験2年以上\n\nWeb / モバイルアプリのプロダクト開発経験\n\n要件定義、仕様策定、ドキュメント作成能力\n\n論理的思考力と高いコミュニケーション能力\n\n複数職種と連携してプロジェクトを推進した経験\n\nユーザー体験とビジネスの両面を考えられる方\n\n⭐ 歓迎スキル\n\nソーシャル / コンテンツ / コミュニティ系プロダクト経験\n\n0→1 プロダクト立ち上げ経験\n\nグローバル向け、または多言語プロダクト経験\n\nデータ分析やグロース施策の実務経験\n\nスタートアップでの勤務経験\n\n🎁 福利厚生\n\n社会保険完備（または応相談）\n\n有給休暇\n\n就労ビザサポート\n\nプロダクト中核領域への深い関与\n\nフラットでスピード感のあるチーム文化\n\n🚀 会社について\n\n当社は、日本および海外華人市場向けに、\n「リアルで信頼できる次世代ソーシャルアプリ」 を開発しています。\n\n本人認証・実在位置・詐欺対策・高効率なマッチング\nを中核に、安心・安全で価値あるつながりを提供することを目指しています。",
+            "en": "📍 Location\n\nTokyo, Japan (Remote / Hybrid negotiable)\n\n💰 Salary\n\nMonthly Salary: 20,000 – 50,000 RMB (Negotiable)\n\nPerformance / Project bonus\n\nStock options or equity incentives for core members\n\nCompetitive compensation based on experience and skills\n\n🕘 Working Hours\n\nMonday to Friday: 10:00 – 19:00\n\nWeekends and public holidays off\n\nFlexible working hours / Partial remote work available\n\n📌 Responsibilities\n\nOwn product planning, feature design, and product roadmap for the social app\n\nDefine user requirements, write PRDs, and create prototypes or product specs\n\nWork closely with designers, frontend and backend engineers to deliver features\n\nManage project timelines, releases, and overall product quality\n\nContinuously improve the product based on data analysis and user feedback\n\nParticipate in building the product from 0 to 1 and driving continuous growth\n\n📌 Requirements\n\nBachelor’s degree or equivalent practical experience\n\nAt least 2 years of experience as a Product Manager or similar role\n\nExperience in web or mobile app product development\n\nStrong ability in requirement analysis, documentation, and communication\n\nGood logical thinking and project management skills\n\nExperience working with cross-functional teams\n\nStrong user-centric mindset and business awareness\n\n⭐ Nice to Have\n\nExperience with social / content / community products\n\nExperience building products from 0 to 1\n\nExperience with global or multi-language products\n\nExperience in data-driven product growth\n\nStartup experience\n\n🎁 Benefits\n\nSocial insurance support in Japan (or negotiable)\n\nPaid holidays\n\nWork visa support\n\nOwnership of core product direction\n\nFlat team structure, fast decision-making"
+          }
+        }
+      ]
+    },
+    {
+      "id": "marketing",
+      "title": {
+        "zh": "项目运维",
+        "ja": "プロジェクト運用",
+        "en": "Project Operations"
+      },
+      "desc": {
+        "zh": "连接品牌与用户，让更多人认识 Kizuna。",
+        "ja": "ブランドとコミュニティをつなぐ仕事です。",
+        "en": "Connect the brand and the community through thoughtful storytelling."
+      },
+      "roles": [
+        {
+          "id": "role-brand",
+          "title": {
+            "zh": "产品运维专员",
+            "ja": "プロダクト運用・運営担当",
+            "en": "Product Operations"
+          },
+          "location": {
+            "zh": "东京",
+            "ja": "東京",
+            "en": "Tokyo"
+          },
+          "desc": {
+            "zh": "📍 工作地点\n\n日本 · 东京（可协商远程 / 混合办公）\n\n💰 薪资待遇\n\n月薪：20,000 – 50,000 RMB（可谈）\n\n绩效奖金 / 项目奖金\n\n核心成员可提供：期权 / 股权激励\n\n根据能力与经验提供有竞争力的待遇\n\n🕘 工作时间\n\n周一至周五：10:00 – 19:00\n\n双休，法定节假日休息\n\n支持弹性工作制 / 部分远程办公\n\n📌 岗位职责（工作内容）\n\n负责产品后台系统的日常配置、维护与数据管理\n\n负责用户内容、账号、举报等相关的运营与审核支持工作\n\n监控产品运行状态，协助处理基础异常问题与用户反馈\n\n配合产品经理与技术团队进行功能测试、版本发布与上线检查\n\n维护产品基础数据、标签体系、配置项等运营工具\n\n整理并输出产品使用规范、运营流程文档\n\n协助搭建和优化产品的日常运营机制与风控流程\n\n📌 任职要求\n\n大专及以上学历（专业不限）\n\n有 互联网产品运营 / 系统运维 / 内容审核 / 后台运营 等相关经验优先\n\n熟悉后台系统、CMS、运营后台等工具者优先\n\n工作细心、有责任心，对数据和流程敏感\n\n具备良好的沟通能力和执行力\n\n能配合多部门协作，推进日常事务落地\n\n⭐ 加分项\n\n有社交 / 内容平台 / 社区产品经验\n\n有风控 / 审核 / 用户治理相关经验\n\n懂基础技术逻辑（不用写代码，但知道系统怎么运作）\n\n有日语 / 英语能力者优先\n\n🎁 福利待遇\n\n按日本当地制度缴纳社会保险（或可协商）\n\n带薪年假\n\n工作签证支持\n\n可参与产品核心运营体系搭建\n\n扁平化团队，成长空间大\n\n🚀 关于我们\n\n我们正在打造一款面向日本及海外华人市场的：\n\n新一代真实社交产品\n核心：真实身份 · 真实位置 · 反诈骗风控 · 高效连接\n\n产品运维岗位将深度参与 产品日常运行与秩序建设，是非常核心的支持角色。",
+            "ja": "📍 勤務地\n\n日本・東京（リモート／ハイブリッド勤務応相談）\n\n💰 給与\n\n月給：20,000 ～ 50,000 RMB（経験・能力により応相談）\n\n成果報酬・プロジェクトボーナスあり\n\nコアメンバー向けインセンティブ制度あり\n\n🕘 勤務時間\n\n平日：10:00 ～ 19:00\n\n完全週休2日制、祝日休み\n\nフレックスタイム／一部リモート可\n\n📌 業務内容\n\nプロダクト管理画面・運営システムの運用・設定・データ管理\n\nユーザーコンテンツ、アカウント、通報対応などの運営サポート\n\nサービス稼働状況のモニタリングおよび一次対応\n\nPM・エンジニアと連携したリリース前チェック、テストサポート\n\nマスターデータ、設定項目、運営ルールの管理\n\n運用フローやマニュアルの整備\n\n不正対策・運営体制の改善サポート\n\n📌 応募要件\n\n学歴不問（実務経験重視）\n\n運営、運用、カスタマーサポート、バックオフィスシステム経験者歓迎\n\n管理画面、CMS、運営ツールの利用経験があれば尚可\n\n正確で丁寧な作業ができる方\n\nチームワークと実行力のある方\n\n⭐ 歓迎スキル\n\nソーシャル／コンテンツ系サービス運用経験\n\n監視・審査・不正対策関連の業務経験\n\nシステム構造への基本的な理解\n\n中国語／日本語／英語が使える方\n\n🎁 福利厚生\n\n社会保険完備（または応相談）\n\n有給休暇\n\n就労ビザサポート\n\nサービス運営中核への参画\n\nフラットなチーム文化",
+            "en": "📍 Location\n\nTokyo, Japan (Remote / Hybrid negotiable)\n\n💰 Salary\n\nMonthly Salary: 20,000 – 50,000 RMB (Negotiable)\n\nPerformance / Project bonus\n\nIncentives for core members\n\n🕘 Working Hours\n\nMonday to Friday: 10:00 – 19:00\n\nWeekends and public holidays off\n\nFlexible working hours / Partial remote available\n\n📌 Responsibilities\n\nOperate and maintain the product admin system and operational backend\n\nHandle content moderation, account management, and user reports\n\nMonitor system status and assist with basic issue handling\n\nSupport product releases, testing, and deployment checks\n\nMaintain operational configurations, tags, and basic data\n\nPrepare operation guidelines and documentation\n\nAssist in building and improving risk control and operation workflows\n\n📌 Requirements\n\nCollege degree or above (or equivalent experience)\n\nExperience in product operations, system operations, content moderation, or support roles is a plus\n\nFamiliar with admin systems or CMS tools is a plus\n\nCareful, responsible, and process-oriented\n\nGood communication and execution skills\n\n⭐ Nice to Have\n\nExperience with social or content platforms\n\nExperience in risk control, moderation, or user governance\n\nBasic understanding of technical systems\n\nJapanese / Chinese / English language skills\n\n🎁 Benefits\n\nSocial insurance support in Japan (or negotiable)\n\nPaid holidays\n\nWork visa support\n\nOpportunity to participate in building core operation systems\n\nFlat team structure, fast growth"
+          }
+        }
+      ]
+    },
+    {
+      "id": "product",
+      "title": {
+        "zh": "行政人员",
+        "ja": "事務スタッフ / 総務スタッフ",
+        "en": "Administrative Staff"
+      },
+      "desc": {
+        "zh": "",
+        "ja": "",
+        "en": ""
+      },
+      "roles": [
+        {
+          "id": "role-lead-designer",
+          "title": {
+            "zh": "政文员",
+            "ja": "行政事務／事務スタッフ",
+            "en": "Administrative Assistant"
+          },
+          "location": {
+            "zh": "东京",
+            "ja": "東京",
+            "en": "Tokyo"
+          },
+          "desc": {
+            "zh": "📍 工作地点\n\n日本 · 东京（原则上坐班，可协商部分远程）\n\n💰 薪资待遇\n\n月薪：20,000 – 50,000 RMB（根据经验与能力调整，可谈）\n\n绩效奖金 / 年终奖（视公司情况）\n\n按日本当地制度缴纳社会保险（或可协商）\n\n可提供：工作签证支持\n\n实际招聘中，这个岗位你也可以写成：\n👉 15k–25k / 20k–30k 区间，更容易匹配行政型人才\n\n🕘 工作时间\n\n周一至周五：10:00 – 19:00（含午休）\n\n双休，法定节假日休息\n\n不加班文化（如遇特殊事务另行协调）\n\n📌 岗位职责（工作内容）\n\n负责公司日常行政事务及办公室日常运转支持\n\n负责文件整理、资料归档、合同与基础文书管理\n\n协助处理公司对外及内部的行政联络工作\n\n负责办公用品采购、资产登记与管理\n\n协助安排会议、整理会议记录及相关跟进事项\n\n协助办理员工入职、离职、考勤等基础人事支持工作\n\n协助财务或管理人员处理简单的报销、资料整理工作\n\n完成上级交办的其他行政支持工作\n\n📌 任职要求\n\n大专及以上学历，专业不限\n\n有 行政 / 文员 / 办公室助理 等相关经验者优先\n\n熟练使用 Office / WPS 等办公软件\n\n工作细心、有条理、责任心强\n\n具备良好的沟通能力与执行力\n\n能适应多任务并行的日常事务处理节奏\n\n有日语或英语基础者优先（非必须）\n\n⭐ 加分项\n\n有日本工作或留学经验\n\n有创业公司 / 小团队行政经验\n\n性格踏实稳定，愿意长期发展\n\n🎁 福利与发展\n\n带薪年假\n\n稳定的工作节奏\n\n可逐步向：\n\n行政主管\n\n综合管理\n\n人事 / 总务方向发展\n\n深度参与一家成长型公司的日常运营\n\n🏢 关于我们\n\n我们正在东京打造一款面向日本及海外华人市场的新一代真实社交产品，团队规模精简、氛围务实，行政文员将作为公司日常运转的重要支撑角色，参与公司从 0 到 1 的成长过程。",
+            "ja": "📍 勤務地\n\n日本・東京（原則オフィス勤務、一部リモート応相談）\n\n💰 給与\n\n月給：20,000 ～ 50,000 RMB（経験・能力により応相談）\n\n成果報酬／業績賞与（会社状況による）\n\n社会保険完備（または応相談）\n\n就労ビザサポートあり\n\n🕘 勤務時間\n\n平日：10:00 ～ 19:00（休憩時間含む）\n\n完全週休2日制、祝日休み\n\n残業ほぼなし（特別な場合は別途調整）\n\n📌 業務内容\n\n会社の日常的な総務・事務業務のサポート\n\n書類整理、ファイリング、契約書などの管理\n\n社内外の連絡対応\n\n備品の発注・管理、オフィス環境の維持\n\n会議の手配、議事録作成およびフォローアップ\n\n入退社手続き、勤怠管理などの人事サポート業務\n\n経費精算などの簡単な事務処理サポート\n\nその他、上長からの指示業務\n\n📌 応募要件\n\n学歴不問（実務経験重視）\n\n事務／総務／アシスタント経験者歓迎\n\nOffice（Word, Excel, PowerPoint）などの基本操作ができる方\n\n丁寧で責任感のある方\n\nコミュニケーション能力があり、マルチタスクに対応できる方\n\n日本語が使える方（英語・中国語ができれば尚可）\n\n⭐ 歓迎スキル\n\nベンチャー企業や小規模チームでの事務経験\n\n日本での就業経験\n\n長期的に安定して働きたい方\n\n🎁 福利厚生\n\n有給休暇\n\n安定した勤務環境\n\n会社の成長とともに管理部門へのキャリアアップのチャンスあり\n\n🏢 会社について\n\n当社は、東京を拠点に、日本および海外華人市場向けの次世代ソーシャルアプリを開発しています。\n行政・事務スタッフは、会社運営を支える重要なポジションです。",
+            "en": "📍 Location\n\nTokyo, Japan (On-site, partial remote negotiable)\n\n💰 Salary\n\nMonthly Salary: 20,000 – 50,000 RMB (Negotiable, based on experience)\n\nPerformance bonus / Annual bonus (depending on company performance)\n\nSocial insurance support (or negotiable)\n\nWork visa support available\n\n🕘 Working Hours\n\nMonday to Friday: 10:00 – 19:00 (including break)\n\nWeekends and public holidays off\n\nOvertime is rare (only in special cases)\n\n📌 Responsibilities\n\nProvide daily administrative and office support\n\nManage documents, filing, and basic contract administration\n\nHandle internal and external communications\n\nManage office supplies and maintain office environment\n\nArrange meetings, prepare meeting notes, and follow up on tasks\n\nSupport HR tasks such as onboarding, offboarding, and attendance tracking\n\nAssist with simple expense reimbursement and basic paperwork\n\nPerform other administrative tasks assigned by management\n\n📌 Requirements\n\nEducation background flexible (practical experience preferred)\n\nExperience as an admin assistant, office clerk, or similar role is a plus\n\nProficient in Microsoft Office or similar office tools\n\nCareful, responsible, and well-organized\n\nGood communication skills and ability to handle multiple tasks\n\nJapanese proficiency required; English or Chinese is a plus\n\n⭐ Nice to Have\n\nExperience in startups or small teams\n\nWorking experience in Japan\n\nLooking for a stable, long-term position\n\n🎁 Benefits\n\nPaid holidays\n\nStable working environment\n\nCareer growth opportunities in administration or general affairs"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "api": {
+    "api_key": "YOUR_OKX_API_KEY",
+    "api_secret": "YOUR_OKX_API_SECRET",
+    "passphrase": "YOUR_OKX_API_PASSPHRASE",
+    "base_url": "https://www.okx.com"
+  },
+  "trade": {
+    "inst_id": "BTC-USDT",
+    "td_mode": "cash",
+    "dry_run": true
+  },
+  "strategy": {
+    "type": "ma_cross",
+    "bar": "1m",
+    "buy_below": 30000,
+    "sell_above": 35000,
+    "ma_short_window": 7,
+    "ma_long_window": 25,
+    "rsi_period": 14,
+    "rsi_buy": 30,
+    "rsi_sell": 70,
+    "breakout_window": 20
+  },
+  "risk": {
+    "max_order_usdt": 20,
+    "max_position_usdt": 100,
+    "min_order_usdt": 5,
+    "min_balance_usdt": 5,
+    "stop_loss_pct": 0.05,
+    "take_profit_pct": 0.1,
+    "cooldown_seconds": 30,
+    "max_daily_loss_pct": 0.1,
+    "max_drawdown_pct": 0.2,
+    "max_trades_per_day": 20
+  },
+  "loop": {
+    "interval_seconds": 10,
+    "state_file": "okx_state.json"
+  }
+}

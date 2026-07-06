@@ -1,0 +1,15 @@
+{
+  "download_root": "/data/telegram_downloads",
+  "telegram_api_id": "",
+  "telegram_api_hash": "",
+  "upload_base_url": "https://userapi.sfthyf.cn",
+  "upload_account": "",
+  "upload_password": "",
+  "upload_meta": true,
+  "auto_upload_default": true,
+  "api_token": "",
+  "video_meta_url": "",
+  "movie_create_url": "https://userapi.sfthyf.cn/api/movie/create",
+  "movie_category_default": "纪录片",
+  "video_type_threshold_seconds": 600
+}

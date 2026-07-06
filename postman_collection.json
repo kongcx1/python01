@@ -1,0 +1,118 @@
+{
+  "info": {
+    "name": "Telegram Downloader Server API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://54.46.103.244:8787" },
+    { "key": "token", "value": "" },
+    { "key": "task_id", "value": "1" }
+  ],
+  "item": [
+    {
+      "name": "Create Task",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": "{{base_url}}/tasks",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"channel\": \"@sosocw\",\n  \"message_ids\": [13968, 13969],\n  \"auto_upload\": true,\n  \"upload_meta\": true\n}"
+        }
+      }
+    },
+    {
+      "name": "List Tasks",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": "{{base_url}}/tasks?limit=20&offset=0"
+      }
+    },
+    {
+      "name": "Task Summary",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": "{{base_url}}/tasks/summary"
+      }
+    },
+    {
+      "name": "Get Task",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": "{{base_url}}/tasks/{{task_id}}"
+      }
+    },
+    {
+      "name": "Get Task Files",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": "{{base_url}}/tasks/{{task_id}}/files"
+      }
+    },
+    {
+      "name": "Get Task Log",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": "{{base_url}}/tasks/{{task_id}}/log?limit=200&offset=0"
+      }
+    },
+    {
+      "name": "Retry Task",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": "{{base_url}}/tasks/{{task_id}}/retry"
+      }
+    },
+    {
+      "name": "Cancel Task",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": "{{base_url}}/tasks/{{task_id}}/cancel"
+      }
+    },
+    {
+      "name": "Delete Task",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": "{{base_url}}/tasks/{{task_id}}"
+      }
+    },
+    {
+      "name": "Clean Stale",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": "{{base_url}}/tasks/clean_stale"
+      }
+    }
+  ]
+}

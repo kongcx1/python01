@@ -1,0 +1,46 @@
+{
+  "name": "telegram-download-admin-vue",
+  "version": "1.0.0",
+  "description": "Telegram download management page rebuilt with Vue 2, Vue CLI 4 and Element UI.",
+  "author": "Codex",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vue-cli-service serve",
+    "build:prod": "vue-cli-service build",
+    "build:stage": "vue-cli-service build --mode staging",
+    "lint": "vue-cli-service lint"
+  },
+  "dependencies": {
+    "axios": "0.18.1",
+    "core-js": "3.6.5",
+    "element-ui": "2.13.2",
+    "js-cookie": "2.2.0",
+    "normalize.css": "8.0.1",
+    "nprogress": "0.2.0",
+    "path-to-regexp": "2.4.0",
+    "spark-md5": "^3.0.2",
+    "vue": "2.6.10",
+    "vue-router": "3.0.6",
+    "vuex": "3.1.0"
+  },
+  "devDependencies": {
+    "@vue/cli-plugin-babel": "4.4.4",
+    "@vue/cli-plugin-eslint": "4.4.4",
+    "@vue/cli-service": "4.4.4",
+    "babel-eslint": "10.1.0",
+    "babel-plugin-dynamic-import-node": "2.3.3",
+    "eslint": "6.7.2",
+    "eslint-plugin-vue": "6.2.2",
+    "sass": "1.26.8",
+    "sass-loader": "8.0.2",
+    "vue-template-compiler": "2.6.10"
+  },
+  "engines": {
+    "node": ">=8.9",
+    "npm": ">=3.0.0"
+  },
+  "browserslist": [
+    "> 1%",
+    "last 2 versions"
+  ]
+}

@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kizuna Admin</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <style>
+      .admin-shell {
+        max-width: 1100px;
+        margin: 40px auto;
+        padding: 0 24px 60px;
+        display: grid;
+        gap: 20px;
+      }
+      .admin-header {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: 1fr minmax(220px, 280px);
+        align-items: end;
+      }
+      .admin-shell h1 {
+        font-size: 28px;
+      }
+      .admin-section {
+        display: grid;
+        gap: 16px;
+      }
+      .admin-section-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .admin-row {
+        display: grid;
+        gap: 8px;
+      }
+      .admin-row input,
+      .admin-row textarea {
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid #e5e7eb;
+        font-size: 14px;
+      }
+      .admin-row textarea {
+        min-height: 90px;
+        resize: vertical;
+      }
+      .admin-actions {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .admin-actions button,
+      .admin-section-head button {
+        padding: 10px 16px;
+        border-radius: 8px;
+        border: none;
+        background: #111111;
+        color: #ffffff;
+        cursor: pointer;
+      }
+      .admin-actions button.secondary,
+      .admin-section-head button.secondary {
+        background: #ffffff;
+        color: #111111;
+        border: 1px solid #111111;
+      }
+      .admin-status {
+        font-size: 13px;
+        color: #6b7280;
+      }
+      .admin-list {
+        display: grid;
+        gap: 16px;
+      }
+      .admin-card {
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        padding: 16px;
+        display: grid;
+        gap: 16px;
+      }
+      .admin-card--nested {
+        background: #fafafa;
+      }
+      .admin-card-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+      }
+      .admin-grid {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      }
+      .admin-grid--compact {
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      }
+      .admin-subhead {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        font-weight: 600;
+      }
+      .text-danger {
+        background: transparent;
+        border: none;
+        color: #b91c1c;
+        cursor: pointer;
+      }
+      @media (max-width: 900px) {
+        .admin-header {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="admin-shell">
+      <header class="admin-header">
+        <div>
+          <h1>Kizuna 内容后台</h1>
+          <p class="section-lead">
+            管理新闻中心与招聘信息（分类 / 岗位）。保存后会立即更新网站内容。
+          </p>
+        </div>
+        <div class="admin-row">
+          <label for="adminToken">管理员令牌</label>
+          <input id="adminToken" type="password" placeholder="PORTAL_ADMIN_TOKEN" />
+        </div>
+      </header>
+
+      <div class="admin-actions">
+        <button type="button" id="loadContent">从后台加载</button>
+        <button type="button" class="secondary" id="loadLocal">加载本地 content.json</button>
+        <button type="button" id="saveContent">保存到后台</button>
+      </div>
+      <div id="adminStatus" class="admin-status">准备就绪</div>
+
+      <section class="admin-section">
+        <div class="admin-section-head">
+          <h2>新闻中心</h2>
+          <button type="button" class="secondary" id="addNews">新增新闻</button>
+        </div>
+        <div id="newsList" class="admin-list"></div>
+      </section>
+
+      <section class="admin-section">
+        <div class="admin-section-head">
+          <h2>招聘分类</h2>
+          <button type="button" class="secondary" id="addGroup">新增分类</button>
+        </div>
+        <div id="groupList" class="admin-list"></div>
+      </section>
+    </main>
+    <template id="newsItemTpl">
+      <div class="admin-card">
+        <div class="admin-card-head">
+          <h3>新闻</h3>
+          <button type="button" class="text-danger" data-remove>删除</button>
+        </div>
+        <div class="admin-grid">
+          <div class="admin-row">
+            <label>标题（中文）</label>
+            <input type="text" data-field="title.zh" />
+          </div>
+          <div class="admin-row">
+            <label>标题（日语）</label>
+            <input type="text" data-field="title.ja" />
+          </div>
+          <div class="admin-row">
+            <label>标题（英文）</label>
+            <input type="text" data-field="title.en" />
+          </div>
+          <div class="admin-row">
+            <label>正文（中文）</label>
+            <textarea data-field="body.zh"></textarea>
+          </div>
+          <div class="admin-row">
+            <label>正文（日语）</label>
+            <textarea data-field="body.ja"></textarea>
+          </div>
+          <div class="admin-row">
+            <label>正文（英文）</label>
+            <textarea data-field="body.en"></textarea>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <template id="groupTpl">
+      <div class="admin-card">
+        <div class="admin-card-head">
+          <h3>分类</h3>
+          <button type="button" class="text-danger" data-remove>删除分类</button>
+        </div>
+        <div class="admin-grid">
+          <div class="admin-row">
+            <label>分类名（中文）</label>
+            <input type="text" data-field="title.zh" />
+          </div>
+          <div class="admin-row">
+            <label>分类名（日语）</label>
+            <input type="text" data-field="title.ja" />
+          </div>
+          <div class="admin-row">
+            <label>分类名（英文）</label>
+            <input type="text" data-field="title.en" />
+          </div>
+          <div class="admin-row">
+            <label>描述（中文）</label>
+            <textarea data-field="desc.zh"></textarea>
+          </div>
+          <div class="admin-row">
+            <label>描述（日语）</label>
+            <textarea data-field="desc.ja"></textarea>
+          </div>
+          <div class="admin-row">
+            <label>描述（英文）</label>
+            <textarea data-field="desc.en"></textarea>
+          </div>
+        </div>
+        <div class="admin-subhead">
+          <span>岗位列表</span>
+          <button type="button" class="secondary" data-add-role>新增岗位</button>
+        </div>
+        <div class="admin-list" data-role-list></div>
+      </div>
+    </template>
+
+    <template id="roleTpl">
+      <div class="admin-card admin-card--nested">
+        <div class="admin-card-head">
+          <h4>岗位</h4>
+          <button type="button" class="text-danger" data-remove>删除岗位</button>
+        </div>
+        <div class="admin-grid admin-grid--compact">
+          <div class="admin-row">
+            <label>岗位名（中文）</label>
+            <input type="text" data-field="title.zh" />
+          </div>
+          <div class="admin-row">
+            <label>岗位名（日语）</label>
+            <input type="text" data-field="title.ja" />
+          </div>
+          <div class="admin-row">
+            <label>岗位名（英文）</label>
+            <input type="text" data-field="title.en" />
+          </div>
+          <div class="admin-row">
+            <label>地点（中文）</label>
+            <input type="text" data-field="location.zh" />
+          </div>
+          <div class="admin-row">
+            <label>地点（日语）</label>
+            <input type="text" data-field="location.ja" />
+          </div>
+          <div class="admin-row">
+            <label>地点（英文）</label>
+            <input type="text" data-field="location.en" />
+          </div>
+          <div class="admin-row">
+            <label>岗位描述（中文）</label>
+            <textarea data-field="desc.zh"></textarea>
+          </div>
+          <div class="admin-row">
+            <label>岗位描述（日语）</label>
+            <textarea data-field="desc.ja"></textarea>
+          </div>
+          <div class="admin-row">
+            <label>岗位描述（英文）</label>
+            <textarea data-field="desc.en"></textarea>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <script src="./admin_ui.js"></script>
+  </body>
+</html>
