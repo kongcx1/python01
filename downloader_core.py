@@ -67,6 +67,7 @@ async def _cancel_pending_telethon_tasks() -> None:
         )
     except BaseException:
         pass
+    await asyncio.sleep(0)
 
 
 async def _wait_client_telethon_tasks(client: TelegramClient, timeout: float = 2.0) -> None:
@@ -96,29 +97,41 @@ async def _wait_client_telethon_tasks(client: TelegramClient, timeout: float = 2
             pass
 
 
+async def _disconnect_telethon_object(obj: object, timeout: float = 2.0) -> None:
+    async def _maybe_await(result: object) -> None:
+        if hasattr(result, "__await__"):
+            await asyncio.wait_for(result, timeout=timeout)  # type: ignore[arg-type]
+
+    for method_name in ("disconnect", "close"):
+        method = getattr(obj, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            await _maybe_await(method())
+        except BaseException:
+            pass
+
+
 async def close_client(client: TelegramClient) -> None:
     async def _maybe_await(result: object) -> None:
         if hasattr(result, "__await__"):
-            await result  # type: ignore[misc]
+            await asyncio.wait_for(result, timeout=3)  # type: ignore[arg-type]
 
+    sender = getattr(client, "_sender", None)
+    connection = getattr(sender, "_connection", None) if sender is not None else None
     try:
-        if client.is_connected():
-            try:
-                await _maybe_await(client.disconnect())
-            except Exception:
-                sender = getattr(client, "_sender", None)
-                if sender is not None:
-                    try:
-                        await _maybe_await(sender.disconnect())
-                    except Exception:
-                        pass
-    except Exception:
+        await _maybe_await(client.disconnect())
+    except BaseException:
         pass
-    await _wait_client_telethon_tasks(client)
-    await asyncio.sleep(0.1)
+    await _disconnect_telethon_object(sender)
+    await _disconnect_telethon_object(connection)
+    await _wait_client_telethon_tasks(client, timeout=4)
+    await _cancel_pending_telethon_tasks()
+    await asyncio.sleep(0.5)
+    await _wait_client_telethon_tasks(client, timeout=2)
     try:
         client.session.close()
-    except Exception:
+    except BaseException:
         pass
     await _cancel_pending_telethon_tasks()
 
@@ -129,7 +142,7 @@ async def shield_close_client(client: TelegramClient) -> None:
         await asyncio.shield(close_task)
     except asyncio.CancelledError:
         try:
-            await asyncio.wait_for(asyncio.shield(close_task), timeout=3)
+            await asyncio.wait_for(asyncio.shield(close_task), timeout=6)
         except BaseException:
             pass
         raise
@@ -1309,6 +1322,8 @@ async def list_videos(
     preview_media_timeout: float = 8,
     nearby_lookup_timeout: float = 5,
     max_extra_images: int = 3,
+    max_thumb_attempts: int = 4,
+    preview_thumb_total_timeout: float = 3,
     get_phone_cb: Optional[Callable[[], str]] = None,
     get_code_cb: Optional[Callable[[], str]] = None,
     get_password_cb: Optional[Callable[[], str]] = None,
@@ -1445,7 +1460,19 @@ async def list_videos(
         scanned = 0
         scan_limited = False
         last_seen_id: Optional[int] = None
-        async for message in messages:
+        aiter = messages.__aiter__()
+        while True:
+            timeout = remaining_timeout(4)
+            if timeout is not None and timeout <= 0:
+                scan_limited = True
+                break
+            try:
+                message = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                scan_limited = True
+                break
             last_seen_id = message.id
             scanned += 1
             if deadline_expired():
@@ -1475,7 +1502,7 @@ async def list_videos(
 
             caption = message_caption(message)
             group_messages = None
-            if message.grouped_id:
+            if message.grouped_id and max_extra_images > 0:
                 group_messages = []
                 async for msg in client.iter_messages(
                     channel,
@@ -1507,7 +1534,11 @@ async def list_videos(
                 continue
 
             preview_path = None
-            for thumb_index in (-1, 0, 1, 2):
+            thumb_deadline = time.monotonic() + max(0.1, preview_thumb_total_timeout)
+            thumb_indexes = (-1, 0, 1, 2)[: max(1, min(4, max_thumb_attempts))]
+            for thumb_index in thumb_indexes:
+                if time.monotonic() >= thumb_deadline:
+                    break
                 preview_path = await download_thumb(
                     message, f"{message.id}_preview_{thumb_index}.jpg", thumb_index
                 )
@@ -1516,7 +1547,9 @@ async def list_videos(
             if deadline_expired():
                 scan_limited = True
             extra_images: list[str] = []
-            if group_messages is not None:
+            if max_extra_images <= 0:
+                pass
+            elif group_messages is not None:
                 group_messages.sort(key=lambda m: m.id)
                 for msg in group_messages:
                     if deadline_expired():

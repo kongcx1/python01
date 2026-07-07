@@ -17,7 +17,7 @@ export function verifyLoginCode(data) {
 }
 
 export function getLoginStatus(params) {
-  return request({ url: '/auth/status', method: 'get', params, timeout: 120000 })
+  return request({ url: '/auth/status', method: 'get', params, timeout: 12000 })
 }
 
 export function logout(params) {

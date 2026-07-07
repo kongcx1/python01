@@ -6,6 +6,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -28,6 +29,10 @@ from downloader_core import build_client, extract_tags, is_filtered_caption, lis
 from server_upload import UploadClient
 
 
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
 STATE_DIR = Path(os.getenv("SERVER_STATE_DIR", "server_state"))
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -38,17 +43,20 @@ DEFAULT_UPLOAD_BASE_URL = "https://userapi.sfthyf.cn"
 DEFAULT_VIDEO_META_URL = "https://userapi.sfthyf.cn/api/short/create"
 DEFAULT_MOVIE_CREATE_URL = "https://userapi.sfthyf.cn/api/movie/create"
 DEFAULT_VIDEO_TYPE_THRESHOLD_SECONDS = 600
-PREVIEW_SOFT_TIMEOUT_SECONDS = 38
-PREVIEW_HARD_TIMEOUT_SECONDS = 55
+PREVIEW_SOFT_TIMEOUT_SECONDS = 18
+PREVIEW_HARD_TIMEOUT_SECONDS = 24
+AUTH_STATUS_TIMEOUT_SECONDS = 8
 SPARK_MD5_HELPER = Path(__file__).resolve().parent / "tools" / "spark_md5_file.js"
 _db_init_lock = threading.Lock()
 _db_initialized = False
 _db_write_lock = threading.Lock()
+DB_BUSY_TIMEOUT_MS = int(os.getenv("SERVER_DB_BUSY_TIMEOUT_MS", "60000"))
+DB_WRITE_RETRIES = int(os.getenv("SERVER_DB_WRITE_RETRIES", "8"))
 
 
 def _db_connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.execute("PRAGMA busy_timeout=30000")
+    conn = sqlite3.connect(DB_PATH, timeout=max(1, DB_BUSY_TIMEOUT_MS // 1000))
+    conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
     global _db_initialized
     if not _db_initialized:
         with _db_init_lock:
@@ -57,6 +65,30 @@ def _db_connect() -> sqlite3.Connection:
                 conn.execute("PRAGMA synchronous=NORMAL")
                 _db_initialized = True
     return conn
+
+
+def _is_db_locked(exc: sqlite3.OperationalError) -> bool:
+    text = str(exc).lower()
+    return "database is locked" in text or "database table is locked" in text
+
+
+def _db_write(action):
+    last_exc: Optional[sqlite3.OperationalError] = None
+    for attempt in range(DB_WRITE_RETRIES):
+        try:
+            with _db_write_lock:
+                with _db_connect() as conn:
+                    result = action(conn)
+                    conn.commit()
+                    return result
+        except sqlite3.OperationalError as exc:
+            if not _is_db_locked(exc):
+                raise
+            last_exc = exc
+            time.sleep(min(2.0, 0.15 * (attempt + 1)))
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("database write failed")
 
 
 class ConnectionManager:
@@ -101,9 +133,11 @@ _progress_throttle_lock = threading.Lock()
 _last_progress_write: dict[int, float] = {}
 _task_cache_lock = threading.Lock()
 _task_cache: dict[int, dict] = {}
-_preview_client: Optional[TelegramClient] = None
-_preview_client_key: Optional[tuple[str, str, str]] = None
-_preview_session_paths: list[Path] = []
+_active_telegram_clients: set[TelegramClient] = set()
+_telegram_client_pool: dict[tuple[str, str, str], TelegramClient] = {}
+_telegram_client_pool_sessions: dict[tuple[str, str, str], list[Path]] = {}
+_telegram_client_pool_last_used: dict[tuple[str, str, str], float] = {}
+TELEGRAM_POOL_IDLE_SECONDS = float(os.getenv("TELEGRAM_POOL_IDLE_SECONDS", "20"))
 
 
 def _cache_task(task: dict) -> None:
@@ -412,10 +446,7 @@ def _update_task(task_id: int, **fields: object) -> None:
     fields["updated_at"] = _utc_now()
     keys = ", ".join(f"{k}=?" for k in fields.keys())
     values = list(fields.values()) + [task_id]
-    with _db_write_lock:
-        with _db_connect() as conn:
-            conn.execute(f"UPDATE tasks SET {keys} WHERE id=?", values)
-            conn.commit()
+    _db_write(lambda conn: conn.execute(f"UPDATE tasks SET {keys} WHERE id=?", values))
     _cache_task({"id": task_id, **fields})
     _broadcast_event({"type": "task_update", "task_id": task_id, "patch": fields})
 
@@ -458,14 +489,14 @@ def _delete_uploaded_videos(channel: str, message_ids: list[int]) -> int:
     if not ids:
         return 0
     placeholders = ",".join("?" for _ in ids)
-    with _db_write_lock:
-        with _db_connect() as conn:
-            cur = conn.execute(
-                f"DELETE FROM uploaded_videos WHERE channel=? AND message_id IN ({placeholders})",
-                (channel, *ids),
-            )
-            conn.commit()
-            return int(cur.rowcount or 0)
+    def _delete(conn):
+        cur = conn.execute(
+            f"DELETE FROM uploaded_videos WHERE channel=? AND message_id IN ({placeholders})",
+            (channel, *ids),
+        )
+        return int(cur.rowcount or 0)
+
+    return int(_db_write(_delete) or 0)
 
 
 def _hash_file_with_hashlib(path: Path) -> str:
@@ -505,32 +536,31 @@ def _record_uploaded_video(
     content_md5: Optional[str] = None,
 ) -> None:
     md5_value = str(content_md5 or "").strip().lower() or None
-    with _db_write_lock:
-        with _db_connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO uploaded_videos (
-                    channel, message_id, file_name, file_size, content_md5, upload_id, uploaded_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(channel, message_id) DO UPDATE SET
-                    file_name=excluded.file_name,
-                    file_size=excluded.file_size,
-                    content_md5=excluded.content_md5,
-                    upload_id=excluded.upload_id,
-                    uploaded_at=excluded.uploaded_at
-                """,
-                (
-                    channel,
-                    int(message_id),
-                    file_name,
-                    int(file_size) if file_size is not None else None,
-                    md5_value,
-                    int(upload_id),
-                    _utc_now(),
-                ),
+    _db_write(
+        lambda conn: conn.execute(
+            """
+            INSERT INTO uploaded_videos (
+                channel, message_id, file_name, file_size, content_md5, upload_id, uploaded_at
             )
-            conn.commit()
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(channel, message_id) DO UPDATE SET
+                file_name=excluded.file_name,
+                file_size=excluded.file_size,
+                content_md5=excluded.content_md5,
+                upload_id=excluded.upload_id,
+                uploaded_at=excluded.uploaded_at
+            """,
+            (
+                channel,
+                int(message_id),
+                file_name,
+                int(file_size) if file_size is not None else None,
+                md5_value,
+                int(upload_id),
+                _utc_now(),
+            ),
+        )
+    )
 
 
 def _merge_task_progress(task_id: int, patch: dict) -> None:
@@ -676,33 +706,33 @@ def _create_task(
     upload_meta: bool,
 ) -> int:
     now = _utc_now()
-    with _db_write_lock:
-        with _db_connect() as conn:
-            cur = conn.execute(
-                """
-                INSERT INTO tasks (
-                    status, channel, message_ids, start_date, end_date, output_dir,
-                    video_type_threshold_seconds,
-                    auto_upload, upload_meta, created_at, updated_at, progress_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    "pending",
-                    channel,
-                    json.dumps(message_ids, ensure_ascii=False),
-                    start_date,
-                    end_date,
-                    output_dir,
-                    video_type_threshold_seconds,
-                    int(auto_upload),
-                    int(upload_meta),
-                    now,
-                    now,
-                    json.dumps({}),
-                ),
-            )
-            conn.commit()
-            task_id = int(cur.lastrowid)
+    def _insert(conn):
+        cur = conn.execute(
+            """
+            INSERT INTO tasks (
+                status, channel, message_ids, start_date, end_date, output_dir,
+                video_type_threshold_seconds,
+                auto_upload, upload_meta, created_at, updated_at, progress_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "pending",
+                channel,
+                json.dumps(message_ids, ensure_ascii=False),
+                start_date,
+                end_date,
+                output_dir,
+                video_type_threshold_seconds,
+                int(auto_upload),
+                int(upload_meta),
+                now,
+                now,
+                json.dumps({}),
+            ),
+        )
+        return int(cur.lastrowid)
+
+    task_id = int(_db_write(_insert))
     _cache_task(
         {
             "id": task_id,
@@ -725,10 +755,7 @@ def _create_task(
 
 
 def _delete_task(task_id: int) -> None:
-    with _db_write_lock:
-        with _db_connect() as conn:
-            conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
-            conn.commit()
+    _db_write(lambda conn: conn.execute("DELETE FROM tasks WHERE id=?", (task_id,)))
     log_path = STATE_DIR / f"task_{task_id}.log"
     if log_path.exists():
         try:
@@ -1010,7 +1037,7 @@ class TaskRunner:
         if running:
             running.stop_event.set()
             _update_task(task_id, status="cancel_requested")
-            _write_task_log(task_id, "æ”¶åˆ°å–æ¶ˆè¯·æ±‚ã€‚")
+            _write_task_log(task_id, "收到取消请求。")
 
     def remove_ids(self, task_id: int, ids: list[int]) -> None:
         running = self._running.get(task_id)
@@ -1443,7 +1470,7 @@ class TaskRunner:
                     collected.append(message)
             return list(reversed(collected))
 
-        client = build_client(api_id, api_hash, output_dir, loop=asyncio.get_running_loop())
+        client = _build_tracked_client(api_id, api_hash, output_dir, loop=asyncio.get_running_loop())
         await client.connect()
         try:
             authorized = await client.is_user_authorized()
@@ -1476,7 +1503,7 @@ class TaskRunner:
                 if running.stop_event.is_set():
                     return
                 if running.is_removed(int(message.id)):
-                    _write_task_log(int(task["id"]), f"è·³è¿‡å·²ç§»é™¤ï¼š{message.id}")
+                    _write_task_log(int(task["id"]), f"跳过已移除：{message.id}")
                     continue
                 while running.is_paused(int(message.id)):
                     await asyncio.sleep(1)
@@ -1484,7 +1511,7 @@ class TaskRunner:
                 file_name = pick_file_name(message, channel)
                 total_bytes = _message_file_size(message)
                 if total_bytes <= 0:
-                    _write_task_log(int(task["id"]), f"æ–‡ä»¶å¤§å°æœªçŸ¥ï¼Œè·³è¿‡ç›´ä¼ ï¼š{message.id}")
+                    _write_task_log(int(task["id"]), f"文件大小未知，跳过直传：{message.id}")
                     continue
                 content_type = _message_mime_type(message)
                 caption_text = await _resolve_message_caption(client, channel, message)
@@ -1871,7 +1898,7 @@ class TaskRunner:
                                 video_id=upload_id,
                             )
                         except Exception as exc:
-                            _write_task_log(int(task["id"]), f"å½±ç‰‡è®°å½•å¤±è´¥: {exc}")
+                            _write_task_log(int(task["id"]), f"影片记录失败: {exc}")
                     elif video_type == "short" and uploader.meta_url:
                         try:
                             thumbnail_id = await _upload_message_thumbnail(
@@ -1890,10 +1917,10 @@ class TaskRunner:
                                 thumbnail_id=thumbnail_id,
                             )
                         except Exception as exc:
-                            _write_task_log(int(task["id"]), f"çŸ­è§†é¢‘è®°å½•å¤±è´¥: {exc}")
+                            _write_task_log(int(task["id"]), f"短视频记录失败: {exc}")
 
         finally:
-            await _close_client(client)
+            await _shield_close_client(client)
 
     def _auto_upload(self, task: dict, output_dir: Path, message_ids: list[int]) -> None:
         config = _load_config()
@@ -1902,7 +1929,7 @@ class TaskRunner:
         password = config.get("upload_password") or ""
         upload_meta = bool(task.get("upload_meta"))
         if not base_url:
-            _write_task_log(int(task["id"]), "æœªé…ç½®ä¸Šä¼ è´¦å·ï¼Œè·³è¿‡ä¸Šä¼ ã€‚")
+            _write_task_log(int(task["id"]), "未配置上传账号，跳过上传。")
             return
 
         target_message_ids: dict[str, str] = {}
@@ -1972,7 +1999,7 @@ class TaskRunner:
                         target_message_ids[target_path.name] = str(row.get("message_id"))
 
         if not targets:
-            _write_task_log(int(task["id"]), "æœªæ‰¾åˆ°å¯ä¸Šä¼ æ–‡ä»¶ã€‚")
+            _write_task_log(int(task["id"]), "未找到可上传文件。")
             return
         total_upload = len(targets)
         _merge_task_progress(
@@ -1994,7 +2021,7 @@ class TaskRunner:
         done_upload = 0
         for index, path in enumerate(targets, start=1):
             if not path.exists():
-                _write_task_log(int(task["id"]), f"æ–‡ä»¶ä¸å­˜åœ¨ï¼Œè·³è¿‡ä¸Šä¼ : {path}")
+                _write_task_log(int(task["id"]), f"文件不存在，跳过上传: {path}")
                 continue
             expected_size = None
             meta_path = output_dir / f"{path.stem}.json"
@@ -2142,7 +2169,7 @@ class TaskRunner:
                         if isinstance(raw_images, list):
                             extra_images = [str(item) for item in raw_images if item]
                     except Exception as exc:
-                        _write_task_log(int(task["id"]), f"è¯»å–è§†é¢‘å…ƒæ•°æ®å¤±è´¥: {exc}")
+                        _write_task_log(int(task["id"]), f"读取视频元数据失败: {exc}")
                 if not content:
                     content = title
                 video_type = "short" if isinstance(duration, (int, float)) and duration <= threshold_seconds else "long"
@@ -2202,9 +2229,9 @@ class TaskRunner:
                                 video_id=upload_id,
                             )
                         except Exception as exc:
-                            _write_task_log(int(task["id"]), f"å½±ç‰‡è®°å½•å¤±è´¥: {exc}")
+                            _write_task_log(int(task["id"]), f"影片记录失败: {exc}")
                     else:
-                        _write_task_log(int(task["id"]), "æœªé…ç½®é•¿è§†é¢‘æŽ¥å£ï¼Œè·³è¿‡å½±ç‰‡è®°å½•ã€‚")
+                        _write_task_log(int(task["id"]), "未配置长视频接口，跳过影片记录。")
                 else:
                     if uploader.meta_url:
                         try:
@@ -2216,9 +2243,9 @@ class TaskRunner:
                                 thumbnail_id=thumb_id,
                             )
                         except Exception as exc:
-                            _write_task_log(int(task["id"]), f"çŸ­è§†é¢‘è®°å½•å¤±è´¥: {exc}")
+                            _write_task_log(int(task["id"]), f"短视频记录失败: {exc}")
                     else:
-                        _write_task_log(int(task["id"]), "æœªé…ç½®çŸ­è§†é¢‘æŽ¥å£ï¼Œè·³è¿‡çŸ­è§†é¢‘è®°å½•ã€‚")
+                        _write_task_log(int(task["id"]), "未配置短视频接口，跳过短视频记录。")
             done_upload += 1
             status_text = "ä¸Šä¼ å®Œæˆ" if done_upload >= total_upload else "ä¸Šä¼ ä¸­"
             _merge_task_progress(
@@ -2818,7 +2845,7 @@ def remove_task_items(task_id: int, req: RemoveItemsRequest) -> dict:
             count["done"] = done
             progress["download_count"] = count
         _update_task(task_id, progress_json=json.dumps(progress))
-    _write_task_log(task_id, f"å·²åˆ é™¤æ‰€é€‰ï¼š{','.join(str(x) for x in removed)}")
+    _write_task_log(task_id, f"已删除所选：{','.join(str(x) for x in removed)}")
     return {"id": task_id, "removed": removed}
 
 
@@ -2845,7 +2872,7 @@ def pause_task_item(task_id: int, req: PauseRequest) -> dict:
     files[key] = state
     progress["files"] = files
     _update_task(task_id, progress_json=json.dumps(progress, ensure_ascii=False))
-    _write_task_log(task_id, f"{'å·²æš‚åœ' if paused else 'ç»§ç»­ä¸‹è½½'}ï¼š{msg_id}")
+    _write_task_log(task_id, f"{'已暂停' if paused else '继续下载'}：{msg_id}")
     _broadcast_event({"type": "task_updated", "task_id": task_id})
     return {"id": task_id, "paused": paused}
 
@@ -2946,6 +2973,38 @@ def _promote_session_to_root(output_dir: Path) -> None:
             ) from exc
 
 
+def _copy_session_files(source_base: Path, target_base: Path) -> list[Path]:
+    copied: list[Path] = []
+    for source in source_base.parent.glob(f"{source_base.name}.session*"):
+        suffix = source.name.replace(source_base.name, "", 1)
+        target = target_base.parent / f"{target_base.name}{suffix}"
+        try:
+            target.write_bytes(source.read_bytes())
+            copied.append(target)
+        except OSError:
+            pass
+    return copied
+
+
+def _pool_session_base(key: tuple[str, str, str]) -> Path:
+    pool_session_dir = STATE_DIR / "pool_sessions"
+    pool_session_dir.mkdir(parents=True, exist_ok=True)
+    key_text = "|".join(key)
+    base_name = "pool_" + hashlib.md5(key_text.encode("utf-8")).hexdigest()
+    return pool_session_dir / base_name
+
+
+def _sync_pool_session_to_output(
+    api_id: str, api_hash: str, output_dir: Path
+) -> None:
+    key = _telegram_pool_key(api_id, api_hash, output_dir)
+    source_base = _pool_session_base(key)
+    target_base = output_dir / "user_session"
+    copied = _copy_session_files(source_base, target_base)
+    if copied:
+        _promote_session_to_root(output_dir)
+
+
 def _validate_login_input(api_id: str, api_hash: str, phone: str) -> None:
     if not str(api_id).strip() or not str(api_hash).strip():
         raise HTTPException(status_code=400, detail="è¯·å¡«å†™ API ID å’Œ API Hashã€‚")
@@ -2955,31 +3014,170 @@ def _validate_login_input(api_id: str, api_hash: str, phone: str) -> None:
         raise HTTPException(status_code=400, detail="æ‰‹æœºå·éœ€åŒ…å«å›½å®¶åŒºå·ï¼Œä¾‹å¦‚ +82 æˆ– +86ã€‚")
 
 
+def _build_tracked_client(
+    api_id: str,
+    api_hash: str,
+    output_dir: Path,
+    loop: Optional[asyncio.AbstractEventLoop] = None,
+    session_path: Optional[Path] = None,
+) -> TelegramClient:
+    client = build_client(
+        api_id,
+        api_hash,
+        output_dir,
+        loop=loop,
+        session_path=session_path,
+    )
+    _patch_telethon_session_lock_handling(client)
+    _active_telegram_clients.add(client)
+    return client
+
+
+def _patch_telethon_session_lock_handling(client: TelegramClient) -> None:
+    save_states = getattr(client, "_save_states_and_entities", None)
+    if callable(save_states) and not getattr(client, "_state_save_patch_applied", False):
+        def _safe_save_states(*args, **kwargs):
+            try:
+                return save_states(*args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                if _is_db_locked(exc):
+                    return None
+                raise
+
+        setattr(client, "_save_states_and_entities", _safe_save_states)
+        try:
+            setattr(client, "_state_save_patch_applied", True)
+        except Exception:
+            pass
+
+    session = getattr(client, "session", None)
+    if session is None or getattr(session, "_lock_patch_applied", False):
+        return
+
+    for method_name in ("save", "process_entities"):
+        method = getattr(session, method_name, None)
+        if not callable(method):
+            continue
+
+        def _make_safe(original):
+            def _safe(*args, **kwargs):
+                try:
+                    return original(*args, **kwargs)
+                except sqlite3.OperationalError as exc:
+                    if _is_db_locked(exc):
+                        return None
+                    raise
+
+            return _safe
+
+        setattr(session, method_name, _make_safe(method))
+    try:
+        setattr(session, "_lock_patch_applied", True)
+    except Exception:
+        pass
+
+
+def _telegram_pool_key(
+    api_id: str,
+    api_hash: str,
+    output_dir: Path,
+) -> tuple[str, str, str]:
+    return (str(api_id), str(api_hash), str(output_dir.resolve()))
+
+
+async def _get_pooled_telegram_client(
+    api_id: str,
+    api_hash: str,
+    output_dir: Path,
+) -> TelegramClient:
+    await _cleanup_idle_pooled_telegram_clients()
+    key = _telegram_pool_key(api_id, api_hash, output_dir)
+    loop = asyncio.get_running_loop()
+    client = _telegram_client_pool.get(key)
+    client_loop = getattr(client, "loop", None) if client is not None else None
+    if client is not None and client_loop is not None and client_loop is not loop:
+        await _close_pooled_telegram_client(key)
+        client = None
+    if client is None:
+        session_path, session_files = _copy_session_for_pool(key, output_dir)
+        client = _build_tracked_client(
+            api_id,
+            api_hash,
+            output_dir,
+            loop=loop,
+            session_path=session_path,
+        )
+        _telegram_client_pool[key] = client
+        _telegram_client_pool_sessions[key] = session_files
+    if not client.is_connected():
+        await asyncio.wait_for(client.connect(), timeout=12)
+    _telegram_client_pool_last_used[key] = time.monotonic()
+    return client
+
+
+async def _cleanup_idle_pooled_telegram_clients() -> None:
+    if TELEGRAM_POOL_IDLE_SECONDS <= 0:
+        return
+    now = time.monotonic()
+    stale_keys = [
+        key
+        for key, last_used in list(_telegram_client_pool_last_used.items())
+        if now - last_used > TELEGRAM_POOL_IDLE_SECONDS
+    ]
+    for key in stale_keys:
+        await _close_pooled_telegram_client(key)
+
+
+async def _close_pooled_telegram_client(key: tuple[str, str, str]) -> None:
+    client = _telegram_client_pool.pop(key, None)
+    session_files = _telegram_client_pool_sessions.pop(key, [])
+    _telegram_client_pool_last_used.pop(key, None)
+    if client is not None:
+        await _shield_close_client(client)
+    session_base = _pool_session_base(key)
+    session_files = list(session_files) + list(
+        session_base.parent.glob(f"{session_base.name}.session*")
+    )
+    if session_files:
+        _cleanup_session_files(session_files)
+
+
+async def _close_all_pooled_telegram_clients() -> None:
+    keys = list(_telegram_client_pool.keys())
+    for key in keys:
+        await _close_pooled_telegram_client(key)
+
+
 async def _close_client(client: TelegramClient) -> None:
     async def _maybe_await(result: object) -> None:
         if hasattr(result, "__await__"):
-            await result  # type: ignore[misc]
+            await asyncio.wait_for(result, timeout=3)  # type: ignore[arg-type]
 
+    sender = getattr(client, "_sender", None)
+    connection = getattr(sender, "_connection", None) if sender is not None else None
     try:
-        if client.is_connected():
-            try:
-                await _maybe_await(client.disconnect())
-            except Exception:
-                sender = getattr(client, "_sender", None)
-                if sender is not None:
-                    try:
-                        await _maybe_await(sender.disconnect())
-                    except Exception:
-                        pass
-    except Exception:
+        await _maybe_await(client.disconnect())
+    except BaseException:
         pass
-    await _wait_client_telethon_tasks(client)
-    await asyncio.sleep(0.1)
+    await _disconnect_telethon_object(sender)
+    await _disconnect_telethon_object(connection)
+    await _wait_client_telethon_tasks(client, timeout=4)
+    await _cancel_pending_telethon_tasks()
+    await asyncio.sleep(0.5)
+    await _wait_client_telethon_tasks(client, timeout=2)
     try:
         client.session.close()
-    except Exception:
+    except BaseException:
         pass
     await _cancel_pending_telethon_tasks()
+    _active_telegram_clients.discard(client)
+    for key, pooled_client in list(_telegram_client_pool.items()):
+        if pooled_client is client:
+            _telegram_client_pool.pop(key, None)
+            session_files = _telegram_client_pool_sessions.pop(key, [])
+            _telegram_client_pool_last_used.pop(key, None)
+            if session_files:
+                _cleanup_session_files(session_files)
 
 
 async def _shield_close_client(client: TelegramClient) -> None:
@@ -2988,7 +3186,7 @@ async def _shield_close_client(client: TelegramClient) -> None:
         await asyncio.shield(close_task)
     except asyncio.CancelledError:
         try:
-            await asyncio.wait_for(asyncio.shield(close_task), timeout=3)
+            await asyncio.wait_for(asyncio.shield(close_task), timeout=6)
         except BaseException:
             pass
         raise
@@ -2997,44 +3195,22 @@ async def _shield_close_client(client: TelegramClient) -> None:
 async def _get_preview_client(
     api_id: str, api_hash: str, output_dir: Path
 ) -> TelegramClient:
-    global _preview_client, _preview_client_key, _preview_session_paths
-    key = (str(api_id), str(api_hash), str(output_dir.resolve()))
-    if _preview_client is not None and _preview_client_key != key:
-        await _close_preview_client()
-        _preview_client = None
-        _preview_client_key = None
-    if _preview_client is None:
-        session_path, copied_paths = _copy_session_for_preview(output_dir)
-        _preview_client = build_client(
-            api_id,
-            api_hash,
-            output_dir,
-            loop=asyncio.get_running_loop(),
-            session_path=session_path,
-        )
-        _preview_client_key = key
-        _preview_session_paths = copied_paths
-    if not _preview_client.is_connected():
-        await _preview_client.connect()
-    return _preview_client
+    return await _get_pooled_telegram_client(api_id, api_hash, output_dir)
 
 
 async def _close_preview_client() -> None:
-    global _preview_client, _preview_client_key, _preview_session_paths
-    client = _preview_client
-    paths = _preview_session_paths
-    _preview_client = None
-    _preview_client_key = None
-    _preview_session_paths = []
-    if client is not None:
-        await _close_client(client)
-    if paths:
-        _cleanup_preview_session(paths)
+    await _close_all_pooled_telegram_clients()
 
 
 @app.on_event("shutdown")
 async def _shutdown_preview_client() -> None:
     await _close_preview_client()
+    clients = list(_active_telegram_clients)
+    for client in clients:
+        await _shield_close_client(client)
+    await _cancel_pending_telethon_tasks()
+    await asyncio.sleep(0.5)
+    await _cancel_pending_telethon_tasks()
 
 
 def _is_telethon_internal_task(task: asyncio.Task) -> bool:
@@ -3066,6 +3242,7 @@ async def _cancel_pending_telethon_tasks() -> None:
         )
     except BaseException:
         pass
+    await asyncio.sleep(0)
 
 
 async def _wait_client_telethon_tasks(client: TelegramClient, timeout: float = 2.0) -> None:
@@ -3095,24 +3272,30 @@ async def _wait_client_telethon_tasks(client: TelegramClient, timeout: float = 2
             pass
 
 
-def _copy_session_for_preview(output_dir: Path) -> tuple[Path, list[Path]]:
-    preview_session_dir = STATE_DIR / "preview_sessions"
-    preview_session_dir.mkdir(parents=True, exist_ok=True)
-    base_name = f"preview_{int(time.time() * 1000)}_{threading.get_ident()}"
-    target_base = preview_session_dir / base_name
-    copied: list[Path] = []
-    for source in output_dir.glob("user_session.session*"):
-        suffix = source.name.replace("user_session", "", 1)
-        target = preview_session_dir / f"{base_name}{suffix}"
+async def _disconnect_telethon_object(obj: object, timeout: float = 2.0) -> None:
+    async def _maybe_await(result: object) -> None:
+        if hasattr(result, "__await__"):
+            await asyncio.wait_for(result, timeout=timeout)  # type: ignore[arg-type]
+
+    for method_name in ("disconnect", "close"):
+        method = getattr(obj, method_name, None)
+        if not callable(method):
+            continue
         try:
-            shutil.copy2(source, target)
-            copied.append(target)
-        except OSError:
+            await _maybe_await(method())
+        except BaseException:
             pass
+
+
+def _copy_session_for_pool(
+    key: tuple[str, str, str], output_dir: Path
+) -> tuple[Path, list[Path]]:
+    target_base = _pool_session_base(key)
+    copied = _copy_session_files(output_dir / "user_session", target_base)
     return target_base, copied
 
 
-def _cleanup_preview_session(paths: list[Path]) -> None:
+def _cleanup_session_files(paths: list[Path]) -> None:
     cleanup: set[Path] = set(paths)
     for path in paths:
         if ".session" in path.name:
@@ -3133,21 +3316,23 @@ async def _with_client_retry(
     action,
 ) -> object:
     last_exc: Optional[Exception] = None
+    key = _telegram_pool_key(api_id, api_hash, output_dir)
     for _ in range(2):
-        client = build_client(
-            api_id, api_hash, output_dir, loop=asyncio.get_running_loop()
-        )
         try:
-            await client.connect()
+            client = await _get_pooled_telegram_client(api_id, api_hash, output_dir)
             return await action(client)
         except sqlite3.OperationalError as exc:
             last_exc = exc
             if "locked" not in str(exc).lower():
                 raise
-            await _close_client(client)
+            await _close_pooled_telegram_client(key)
             await asyncio.sleep(0.3)
-        finally:
-            await _close_client(client)
+        except Exception as exc:
+            last_exc = exc
+            if not _is_retryable_telegram_disconnect(exc):
+                raise
+            await _close_pooled_telegram_client(key)
+            await asyncio.sleep(0.3)
     if last_exc:
         raise last_exc
     raise RuntimeError("æœªçŸ¥é”™è¯¯")
@@ -3233,6 +3418,7 @@ async def verify_login_code(req: VerifyRequest) -> dict:
                 _login_codes.pop(key, None)
 
     await _with_client_lock_async(_do_sign_in)
+    _sync_pool_session_to_output(api_id, api_hash, output_dir)
     _promote_session_to_root(output_dir)
     return {"status": "ok"}
 
@@ -3274,10 +3460,24 @@ async def login_status(
         return await _with_client_retry(api_id, api_hash, output_path, _status)
 
     try:
-        status = await _with_client_lock_async(_do_status)
+        status = await asyncio.wait_for(
+            _with_client_lock_async(_do_status),
+            timeout=AUTH_STATUS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        await _close_pooled_telegram_client(
+            _telegram_pool_key(api_id, api_hash, output_path)
+        )
+        await _cancel_pending_telethon_tasks()
+        return {
+            "authorized": False,
+            "user": None,
+            "detail": "Telegram 登录状态检查超时，请稍后重试。",
+        }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     if status.get("authorized"):
+        _sync_pool_session_to_output(api_id, api_hash, output_path)
         _promote_session_to_root(output_path)
     return status
 
@@ -3297,9 +3497,9 @@ async def logout(
         api_hash = ""
 
     async def _do_logout() -> None:
-        await _close_preview_client()
         if not api_id or not api_hash:
             return
+        pool_key = _telegram_pool_key(api_id, api_hash, output_path)
         try:
             await _with_client_retry(
                 api_id,
@@ -3309,6 +3509,7 @@ async def logout(
             )
         except BaseException:
             pass
+        await _close_pooled_telegram_client(pool_key)
 
     await _with_client_lock_async(_do_logout)
     for session_file in output_path.glob("user_session.session*"):
@@ -3339,7 +3540,8 @@ async def preview_videos(req: PreviewRequest) -> dict:
     limit = min(max(int(req.limit or 30), 1), 50)
     offset = max(0, int(req.offset or 0))
     offset_id = req.offset_id
-    max_scan_messages = max(100, min(500, limit * 10))
+    max_scan_messages = max(15, min(60, limit * 4))
+    pool_key = _telegram_pool_key(req.api_id, req.api_hash, output_dir)
     try:
         async def _do_list_once() -> object:
             common_kwargs = {
@@ -3351,9 +3553,11 @@ async def preview_videos(req: PreviewRequest) -> dict:
                 "offset": offset,
                 "offset_id": offset_id,
                 "deadline_monotonic": time.monotonic() + PREVIEW_SOFT_TIMEOUT_SECONDS,
-                "preview_media_timeout": 2,
-                "nearby_lookup_timeout": 1.5,
-                "max_extra_images": 2,
+                "preview_media_timeout": 0.45,
+                "nearby_lookup_timeout": 0.4,
+                "max_extra_images": 0,
+                "max_thumb_attempts": 3,
+                "preview_thumb_total_timeout": 1.2,
                 "get_phone_cb": _login_required,
                 "get_code_cb": _login_required,
                 "get_password_cb": _login_required,
@@ -3375,7 +3579,7 @@ async def preview_videos(req: PreviewRequest) -> dict:
                     last_exc = exc
                     if attempt >= 1 or not _is_retryable_telegram_disconnect(exc):
                         raise
-                    await _close_preview_client()
+                    await _close_pooled_telegram_client(pool_key)
                     await asyncio.sleep(0.5)
             if last_exc:
                 raise last_exc
@@ -3388,6 +3592,7 @@ async def preview_videos(req: PreviewRequest) -> dict:
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except asyncio.TimeoutError:
+        await _close_pooled_telegram_client(pool_key)
         raise HTTPException(
             status_code=504,
             detail="预览加载超时，请降低加载条数后重试，或稍后再点下一页。",
@@ -3396,8 +3601,6 @@ async def preview_videos(req: PreviewRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        await _close_preview_client()
     has_more = len(items) > limit or bool(scan_limited)
     if has_more:
         if len(items) > limit and items[:limit]:
@@ -3475,17 +3678,15 @@ async def preview_stream(
         pass
 
     async def _do_fetch_stream_info() -> tuple[TelegramClient, object, str, Optional[int]]:
-        client = build_client(
-            api_id, api_hash, output_path, loop=asyncio.get_running_loop()
-        )
-        await client.connect()
+        key = _telegram_pool_key(api_id, api_hash, output_path)
+        client = await _get_pooled_telegram_client(api_id, api_hash, output_path)
         authorized = await client.is_user_authorized()
         if not authorized:
-            await _close_client(client)
+            await _close_pooled_telegram_client(key)
             raise HTTPException(status_code=400, detail="æœªç™»å½• Telegramã€‚")
         message = await client.get_messages(channel, ids=message_id)
         if not message or not (message.video or message.document):
-            await _close_client(client)
+            await _close_pooled_telegram_client(key)
             raise HTTPException(status_code=404, detail="è§†é¢‘ä¸å­˜åœ¨")
         media = message.media or message.video or message.document
         mime_type = (
@@ -3561,10 +3762,6 @@ async def preview_stream(
             return
         finally:
             try:
-                await _shield_close_client(client)
-            except BaseException:
-                pass
-            try:
                 _client_lock.release()
             except RuntimeError:
                 pass
@@ -3593,7 +3790,7 @@ def cancel_task(task_id: int) -> dict:
         return {"id": task_id, "status": task["status"]}
     if task["status"] == "pending":
         _update_task(task_id, status="cancelled")
-        _write_task_log(task_id, "ä»»åŠ¡å·²å–æ¶ˆã€‚")
+        _write_task_log(task_id, "任务已取消。")
         return {"id": task_id, "status": "cancelled"}
     _update_task(task_id, status="cancel_requested")
     task_runner.cancel(task_id)
@@ -3609,7 +3806,7 @@ def retry_task(task_id: int) -> dict:
         raise HTTPException(status_code=400, detail="任务运行中，请先取消")
     if task["status"] in ("failed", "cancelled"):
         _update_task(task_id, status="pending", error=None, progress_json=json.dumps({}))
-        _write_task_log(task_id, "å·²é‡è¯•ï¼šç»§ç»­å½“å‰ä»»åŠ¡ã€‚")
+        _write_task_log(task_id, "已重试：继续当前任务。")
         return {"id": task_id, "status": "pending"}
     return {"id": task_id, "status": task["status"]}
 
@@ -3639,14 +3836,14 @@ def upload_task(task_id: int) -> dict:
                 message_ids = json.loads(latest.get("message_ids") or "[]")
             except Exception:
                 message_ids = []
-            _write_task_log(task_id, "å¼€å§‹ä¸Šä¼ å·²ä¸‹è½½æ–‡ä»¶ã€‚")
+            _write_task_log(task_id, "开始上传已下载文件。")
             _update_task(task_id, status="uploading")
             task_runner._auto_upload(latest, output_dir, message_ids)
             _update_task(task_id, status="done")
-            _write_task_log(task_id, "å·²ä¸‹è½½æ–‡ä»¶ä¸Šä¼ å®Œæˆã€‚")
+            _write_task_log(task_id, "已下载文件上传完成。")
         except Exception as exc:
             _update_task(task_id, status="failed", error=str(exc))
-            _write_task_log(task_id, f"ä¸Šä¼ å¤±è´¥: {exc}")
+            _write_task_log(task_id, f"上传失败: {exc}")
 
     threading.Thread(target=_run_upload, daemon=True).start()
     return {"id": task_id, "status": "uploading"}
@@ -3666,19 +3863,20 @@ def delete_task(task_id: int) -> dict:
 @app.post("/tasks/clean_stale", dependencies=[Depends(_require_token)])
 def clean_stale_tasks() -> dict:
     stale_seconds = int(os.getenv("SERVER_STALE_SECONDS", "3600"))
-    cleaned = 0
-    with _db_write_lock:
-        with _db_connect() as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT id, status, updated_at FROM tasks WHERE status IN ('running','pending','cancel_requested')"
-            ).fetchall()
-            for row in rows:
-                if _is_stale(row["updated_at"], stale_seconds):
-                    conn.execute(
-                        "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
-                        ("stale", _utc_now(), row["id"]),
-                    )
-                    cleaned += 1
-            conn.commit()
+    def _clean(conn):
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, status, updated_at FROM tasks WHERE status IN ('running','pending','cancel_requested')"
+        ).fetchall()
+        cleaned = 0
+        for row in rows:
+            if _is_stale(row["updated_at"], stale_seconds):
+                conn.execute(
+                    "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
+                    ("stale", _utc_now(), row["id"]),
+                )
+                cleaned += 1
+        return cleaned
+
+    cleaned = int(_db_write(_clean) or 0)
     return {"cleaned": cleaned, "stale_seconds": stale_seconds}
