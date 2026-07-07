@@ -1556,21 +1556,41 @@ async def list_videos(
 
             caption = message_caption(message)
             group_messages = None
-            if message.grouped_id and max_extra_images > 0:
+            if message.grouped_id:
                 group_messages = []
-                async for msg in client.iter_messages(
-                    channel,
-                    min_id=max(0, message.id - 30),
-                    max_id=message.id + 30,
-                ):
-                    if msg.grouped_id == message.grouped_id:
-                        group_messages.append(msg)
+                try:
+                    async for msg in client.iter_messages(
+                        channel,
+                        min_id=max(0, message.id - 30),
+                        max_id=message.id + 30,
+                    ):
+                        if msg.grouped_id == message.grouped_id:
+                            group_messages.append(msg)
+                except Exception:
+                    group_messages = []
                 if not caption:
                     for msg in group_messages:
                         msg_caption = message_caption(msg)
                         if msg_caption:
                             caption = msg_caption
                             break
+            if not caption and not deadline_expired():
+                nearby_ids = list(range(max(1, message.id - 3), message.id + 4))
+                timeout = remaining_timeout(0.8)
+                try:
+                    nearby_messages = await asyncio.wait_for(
+                        client.get_messages(channel, ids=nearby_ids),
+                        timeout=timeout,
+                    )
+                except Exception:
+                    nearby_messages = []
+                for msg in nearby_messages:
+                    if not msg or msg.id == message.id:
+                        continue
+                    msg_caption = message_caption(msg)
+                    if msg_caption and not is_filtered_caption(msg_caption):
+                        caption = msg_caption
+                        break
             tags = extract_tags(caption)
             if is_filtered_caption(caption):
                 continue
