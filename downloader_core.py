@@ -1377,15 +1377,21 @@ async def list_videos(
         timeout = remaining_timeout(preview_media_timeout)
         if timeout is not None and timeout <= 0:
             return None
+        download_task = asyncio.create_task(
+            client.download_media(
+                message,
+                file=str(target),
+                thumb=thumb_index,
+            )
+        )
+        download_task.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
         try:
             result = await asyncio.wait_for(
-                client.download_media(
-                    message,
-                    file=str(target),
-                    thumb=thumb_index,
-                ),
+                asyncio.shield(download_task),
                 timeout=timeout,
             )
+        except asyncio.TimeoutError:
+            return None
         except Exception:
             return None
         if not result:
@@ -1412,11 +1418,15 @@ async def list_videos(
         timeout = remaining_timeout(preview_media_timeout)
         if timeout is not None and timeout <= 0:
             return None
+        download_task = asyncio.create_task(client.download_media(message, file=str(target)))
+        download_task.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
         try:
             result = await asyncio.wait_for(
-                client.download_media(message, file=str(target)),
+                asyncio.shield(download_task),
                 timeout=timeout,
             )
+        except asyncio.TimeoutError:
+            return None
         except Exception:
             return None
         if not result:
@@ -1535,7 +1545,7 @@ async def list_videos(
 
             preview_path = None
             thumb_deadline = time.monotonic() + max(0.1, preview_thumb_total_timeout)
-            thumb_indexes = (-1, 0, 1, 2)[: max(1, min(4, max_thumb_attempts))]
+            thumb_indexes = (0, -1, 1, 2)[: max(1, min(4, max_thumb_attempts))]
             for thumb_index in thumb_indexes:
                 if time.monotonic() >= thumb_deadline:
                     break
