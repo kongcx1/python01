@@ -165,7 +165,11 @@ export default {
         if (data.next_offset_id) this.$set(this.previewCursors, page + 1, data.next_offset_id)
         this.savePreviewState()
         this.syncSelectedRows()
-        this.$message.success(`检测完成，本页 ${this.previewItems.length} 条${this.previewHasMore ? '，还有下一页' : ''}`)
+        if (data.partial_timeout) {
+          this.$message.warning(data.detail || '预览加载超时，请降低加载条数后重试')
+        } else {
+          this.$message.success(`检测完成，本页 ${this.previewItems.length} 条${this.previewHasMore ? '，还有下一页' : ''}`)
+        }
       } catch (error) {
         this.$message.error(error.message || '检测视频失败')
       } finally {

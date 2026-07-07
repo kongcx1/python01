@@ -295,7 +295,11 @@ export default {
         this.saveLocalForm()
         this.savePreviewState()
         this.syncSelectedRows()
-        this.$message.success(`加载完成，本页 ${this.previewItems.length} 条${this.previewHasMore ? '，还有下一页' : ''}`)
+        if (data.partial_timeout) {
+          this.$message.warning(data.detail || '预览加载超时，请降低加载条数后重试')
+        } else {
+          this.$message.success(`加载完成，本页 ${this.previewItems.length} 条${this.previewHasMore ? '，还有下一页' : ''}`)
+        }
       } catch (error) {
         const detail = error.response && error.response.data && error.response.data.detail
         const isTimeout = error.code === 'ECONNABORTED' || (error.message || '').indexOf('timeout') >= 0

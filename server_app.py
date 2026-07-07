@@ -3593,10 +3593,15 @@ async def preview_videos(req: PreviewRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc))
     except asyncio.TimeoutError:
         await _close_pooled_telegram_client(pool_key)
-        raise HTTPException(
-            status_code=504,
-            detail="预览加载超时，请降低加载条数后重试，或稍后再点下一页。",
-        )
+        return {
+            "items": [],
+            "limit": limit,
+            "offset": offset,
+            "has_more": True,
+            "next_offset_id": offset_id,
+            "detail": "预览加载超时，请降低加载条数后重试，或稍后再点下一页。",
+            "partial_timeout": True,
+        }
     except RPCError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
