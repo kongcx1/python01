@@ -3718,6 +3718,11 @@ async def preview_stream(
         if lock_acquired:
             _client_lock.release()
         raise HTTPException(status_code=500, detail=str(exc))
+    # Release before streaming: holding the global client lock for the whole
+    # response lifetime starves every other Telegram endpoint while a browser
+    # player keeps the range request open without consuming it.
+    _client_lock.release()
+    stream_pool_key = _telegram_pool_key(api_id, api_hash, output_path)
 
     start = 0
     end = (total_size - 1) if total_size else None
@@ -3750,6 +3755,9 @@ async def preview_stream(
                 offset=start,
                 request_size=1024 * 128,
             ):
+                # Keep the shared pooled client from being evicted as idle
+                # while a stream is actively consuming it.
+                _telegram_client_pool_last_used[stream_pool_key] = time.monotonic()
                 if length is not None:
                     remaining = length - sent
                     if remaining <= 0:
@@ -3760,11 +3768,6 @@ async def preview_stream(
                 yield chunk
         except asyncio.CancelledError:
             return
-        finally:
-            try:
-                _client_lock.release()
-            except RuntimeError:
-                pass
 
     headers = {"Accept-Ranges": "bytes"}
     status_code = 200
