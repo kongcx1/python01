@@ -47,11 +47,52 @@ PREVIEW_SOFT_TIMEOUT_SECONDS = 18
 PREVIEW_HARD_TIMEOUT_SECONDS = 24
 AUTH_STATUS_TIMEOUT_SECONDS = 8
 SPARK_MD5_HELPER = Path(__file__).resolve().parent / "tools" / "spark_md5_file.js"
+SERVER_CODE_VERSION = "2026-07-07-shutdown-md5-log-v2"
+_server_version_cache: Optional[str] = None
 _db_init_lock = threading.Lock()
 _db_initialized = False
 _db_write_lock = threading.Lock()
 DB_BUSY_TIMEOUT_MS = int(os.getenv("SERVER_DB_BUSY_TIMEOUT_MS", "60000"))
 DB_WRITE_RETRIES = int(os.getenv("SERVER_DB_WRITE_RETRIES", "8"))
+
+
+def _server_version_text() -> str:
+    global _server_version_cache
+    env_version = str(
+        os.getenv("SERVER_APP_VERSION") or os.getenv("APP_VERSION") or ""
+    ).strip()
+    if env_version:
+        return f"version={env_version}"
+    if _server_version_cache:
+        return _server_version_cache
+    repo_dir = Path(__file__).resolve().parent
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=True,
+        ).stdout.strip()
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=True,
+        ).stdout.strip() or "detached"
+        _server_version_cache = (
+            f"version={SERVER_CODE_VERSION} branch={branch} commit={commit}"
+        )
+    except Exception:
+        _server_version_cache = f"version={SERVER_CODE_VERSION}"
+    return _server_version_cache
+
+
+def _write_task_version_log(task_id: int) -> None:
+    _write_task_log(task_id, f"代码版本：{_server_version_text()}")
 
 
 def _db_connect() -> sqlite3.Connection:
@@ -1074,6 +1115,7 @@ class TaskRunner:
                 task_id=task_id, stop_event=stop_event
             )
             _update_task(task_id, status="running")
+            _write_task_version_log(task_id)
             _write_task_log(task_id, "任务开始执行。")
             try:
                 self._run_task(task, self._running[task_id])
@@ -1625,7 +1667,7 @@ class TaskRunner:
                         except FloodWaitError as exc:
                             await _sleep_for_flood_wait(exc, sent_from_telegram)
 
-                async def _hash_telegram_media() -> Optional[str]:
+                async def _hash_telegram_media() -> tuple[Optional[str], int]:
                     digest = hashlib.md5()
                     hashed = 0
                     aiter, first_chunk = await _next_telegram_chunk(0, hashed)
@@ -1651,7 +1693,7 @@ class TaskRunner:
                             if first_chunk:
                                 hashed += len(first_chunk)
                                 digest.update(first_chunk)
-                    return digest.hexdigest() if hashed > 0 else None
+                    return (digest.hexdigest() if hashed > 0 else None), hashed
 
                 _merge_task_progress(
                     int(task["id"]),
@@ -1660,10 +1702,14 @@ class TaskRunner:
                         "status": f"计算MD5 ({index}/{total_upload}): {file_name}",
                     },
                 )
-                content_md5 = await _hash_telegram_media()
                 _write_task_log(
                     int(task["id"]),
-                    f"MD5计算完成：{file_name} md5={content_md5 or '-'}",
+                    f"MD5加密源数据：source=Telegram直传预检 channel={channel} message_id={message.id} file={file_name} bytes={total_bytes} mime={content_type}",
+                )
+                content_md5, hashed_bytes = await _hash_telegram_media()
+                _write_task_log(
+                    int(task["id"]),
+                    f"MD5加密结果：source=Telegram直传预检 file={file_name} hashed_bytes={hashed_bytes} md5={content_md5 or '-'}",
                 )
                 duplicate = _fetch_uploaded_video_by_md5(content_md5)
                 if duplicate:
@@ -1708,7 +1754,7 @@ class TaskRunner:
                     )
                     continue
 
-                async def _direct_upload_once(attempt: int) -> tuple[int, str]:
+                async def _direct_upload_once(attempt: int) -> tuple[int, str, int]:
                     chunks: "queue.Queue[object]" = queue.Queue(maxsize=8)
                     reader = QueueReader(chunks)
                     upload_result: dict[str, object] = {}
@@ -1790,16 +1836,29 @@ class TaskRunner:
                         raise producer_error
                     if upload_result.get("error"):
                         raise upload_result["error"]  # type: ignore[misc]
-                    return int(upload_result.get("upload_id") or 0), md5_digest.hexdigest()
+                    return (
+                        int(upload_result.get("upload_id") or 0),
+                        md5_digest.hexdigest(),
+                        sent_from_telegram,
+                    )
 
                 max_direct_upload_attempts = max(
                     1, int(os.getenv("DIRECT_UPLOAD_RETRIES", "3"))
                 )
                 upload_id = 0
                 content_md5 = None
+                hashed_bytes = 0
                 for attempt in range(1, max_direct_upload_attempts + 1):
                     try:
-                        upload_id, content_md5 = await _direct_upload_once(attempt)
+                        _write_task_log(
+                            int(task["id"]),
+                            f"MD5加密源数据：source=Telegram直传上传 attempt={attempt} channel={channel} message_id={message.id} file={file_name} bytes={total_bytes} mime={content_type}",
+                        )
+                        upload_id, content_md5, hashed_bytes = await _direct_upload_once(attempt)
+                        _write_task_log(
+                            int(task["id"]),
+                            f"MD5加密结果：source=Telegram直传上传 attempt={attempt} file={file_name} hashed_bytes={hashed_bytes} md5={content_md5 or '-'}",
+                        )
                         break
                     except Exception as exc:
                         if running.stop_event.is_set() or attempt >= max_direct_upload_attempts:
@@ -2064,10 +2123,15 @@ class TaskRunner:
                         }
                     },
                 )
+            actual_size = path.stat().st_size
+            _write_task_log(
+                int(task["id"]),
+                f"MD5加密源数据：source=本地文件 path={path} file={path.name} bytes={actual_size}",
+            )
             content_md5 = _file_content_md5(path)
             _write_task_log(
                 int(task["id"]),
-                f"MD5计算完成：{path.name} md5={content_md5 or '-'}",
+                f"MD5加密结果：source=本地文件 file={path.name} hashed_bytes={actual_size} md5={content_md5 or '-'}",
             )
             duplicate = _fetch_uploaded_video_by_md5(content_md5)
             if duplicate:
@@ -2494,6 +2558,34 @@ def _completed_row(output_dir: Path, row: dict) -> dict:
     }
 
 
+def _best_preview_cache_image(output_dir: Path, message_id: object) -> Optional[str]:
+    preview_dir = output_dir / "preview_cache"
+    if not preview_dir.exists():
+        return None
+    safe_id = str(message_id or "").strip()
+    if not safe_id:
+        return None
+    pattern_groups = (
+        f"{safe_id}_preview_-1.*",
+        f"{safe_id}_preview_*",
+        f"{safe_id}_preview.*",
+        f"{safe_id}_img_*",
+        f"{safe_id}_img.*",
+    )
+    candidates: list[Path] = []
+    for pattern in pattern_groups:
+        candidates = [path for path in preview_dir.glob(pattern) if path.is_file()]
+        if candidates:
+            break
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda path: path.stat().st_size if path.exists() else 0)
+    try:
+        return best.relative_to(output_dir).as_posix()
+    except ValueError:
+        return str(best)
+
+
 @app.post("/tasks", dependencies=[Depends(_require_token)])
 def create_task(req: TaskRequest) -> dict:
     if not req.message_ids and not (req.start_date or req.end_date):
@@ -2632,17 +2724,13 @@ def get_task_files(task_id: int) -> dict:
             }
         )
 
-    preview_dir = output_dir / "preview_cache"
     for key, item in merged.items():
         msg_id = item.get("message_id") or key
         if msg_id is None:
             continue
-        preview_path = preview_dir / f"{msg_id}_preview.jpg"
-        if preview_path.exists():
-            try:
-                item["preview_image"] = preview_path.relative_to(output_dir).as_posix()
-            except ValueError:
-                item["preview_image"] = str(preview_path)
+        preview_image = _best_preview_cache_image(output_dir, msg_id)
+        if preview_image:
+            item["preview_image"] = preview_image
 
     def _sort_key(item: dict) -> int:
         value = item.get("message_id")
@@ -3148,6 +3236,17 @@ async def _close_all_pooled_telegram_clients() -> None:
         await _close_pooled_telegram_client(key)
 
 
+def _drop_client_tracking(client: TelegramClient) -> None:
+    _active_telegram_clients.discard(client)
+    for key, pooled_client in list(_telegram_client_pool.items()):
+        if pooled_client is client:
+            _telegram_client_pool.pop(key, None)
+            session_files = _telegram_client_pool_sessions.pop(key, [])
+            _telegram_client_pool_last_used.pop(key, None)
+            if session_files:
+                _cleanup_session_files(session_files)
+
+
 async def _close_client(client: TelegramClient) -> None:
     async def _maybe_await(result: object) -> None:
         if hasattr(result, "__await__"):
@@ -3171,17 +3270,25 @@ async def _close_client(client: TelegramClient) -> None:
     except BaseException:
         pass
     await _cancel_pending_telethon_tasks()
-    _active_telegram_clients.discard(client)
-    for key, pooled_client in list(_telegram_client_pool.items()):
-        if pooled_client is client:
-            _telegram_client_pool.pop(key, None)
-            session_files = _telegram_client_pool_sessions.pop(key, [])
-            _telegram_client_pool_last_used.pop(key, None)
-            if session_files:
-                _cleanup_session_files(session_files)
+    _drop_client_tracking(client)
 
 
 async def _shield_close_client(client: TelegramClient) -> None:
+    loop = asyncio.get_running_loop()
+    client_loop = getattr(client, "loop", None)
+    if client_loop is not None and client_loop is not loop:
+        if getattr(client_loop, "is_closed", lambda: True)():
+            _drop_client_tracking(client)
+            return
+        if getattr(client_loop, "is_running", lambda: False)():
+            future = asyncio.run_coroutine_threadsafe(_close_client(client), client_loop)
+            try:
+                await asyncio.wait_for(asyncio.wrap_future(future), timeout=8)
+            except asyncio.TimeoutError:
+                future.cancel()
+            except BaseException:
+                pass
+            return
     close_task = asyncio.create_task(_close_client(client))
     try:
         await asyncio.shield(close_task)
@@ -3248,6 +3355,7 @@ async def _cancel_pending_telethon_tasks() -> None:
 
 async def _wait_client_telethon_tasks(client: TelegramClient, timeout: float = 2.0) -> None:
     tasks: set[asyncio.Task] = set()
+    current_loop = asyncio.get_running_loop()
     objects = [
         client,
         getattr(client, "_sender", None),
@@ -3257,7 +3365,14 @@ async def _wait_client_telethon_tasks(client: TelegramClient, timeout: float = 2
         if obj is None:
             continue
         for value in getattr(obj, "__dict__", {}).values():
-            if isinstance(value, asyncio.Task) and _is_telethon_internal_task(value):
+            if not isinstance(value, asyncio.Task):
+                continue
+            try:
+                if value.get_loop() is not current_loop:
+                    continue
+            except RuntimeError:
+                continue
+            if _is_telethon_internal_task(value):
                 tasks.add(value)
     if not tasks:
         return
@@ -3554,11 +3669,12 @@ async def preview_videos(req: PreviewRequest) -> dict:
                 "offset": offset,
                 "offset_id": offset_id,
                 "deadline_monotonic": time.monotonic() + PREVIEW_SOFT_TIMEOUT_SECONDS,
-                "preview_media_timeout": 1.2,
+                "preview_media_timeout": 1.8,
                 "nearby_lookup_timeout": 0.4,
-                "max_extra_images": 0,
-                "max_thumb_attempts": 2,
-                "preview_thumb_total_timeout": 1.2,
+                "max_extra_images": 1,
+                "max_thumb_attempts": 3,
+                "preview_thumb_total_timeout": 1.8,
+                "allow_nearby_extra_images": False,
                 "get_phone_cb": _login_required,
                 "get_code_cb": _login_required,
                 "get_password_cb": _login_required,
@@ -3842,6 +3958,7 @@ def upload_task(task_id: int) -> dict:
                 message_ids = json.loads(latest.get("message_ids") or "[]")
             except Exception:
                 message_ids = []
+            _write_task_version_log(task_id)
             _write_task_log(task_id, "开始上传已下载文件。")
             _update_task(task_id, status="uploading")
             task_runner._auto_upload(latest, output_dir, message_ids)

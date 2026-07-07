@@ -36,7 +36,6 @@
               <div class="cover-wrap">
                 <el-image v-if="mainImage(row)" class="cover" :src="imageUrl(row, mainImage(row))" fit="cover" />
                 <div v-else class="cover empty-cover">无封面</div>
-                <span class="play-mark"><i class="el-icon-video-play" /></span>
               </div>
               <div class="thumb-row">
                 <div
@@ -173,11 +172,11 @@ export default {
       this.selectedRows = rows
     },
     allImages(row) {
-      return (row.cover_files || []).concat(row.extra_images || []).filter(Boolean)
+      return (row.extra_images || []).concat(row.cover_files || []).filter(Boolean)
     },
     mainImage(row) {
       const images = this.allImages(row)
-      return images[2] || images[0]
+      return images[0]
     },
     imageList(row) {
       return this.allImages(row).slice(0, 4)
@@ -294,21 +293,6 @@ export default {
     align-items: center;
     justify-content: center;
     color: $textSecondary;
-  }
-
-  .play-mark {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(255, 255, 255, 0.9);
-    color: #606266;
   }
 
   .thumb-row {

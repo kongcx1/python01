@@ -54,7 +54,7 @@
         <el-table-column label="预览" width="320">
           <template slot-scope="{ row }">
             <div class="media-cell">
-              <button class="preview-tile" type="button" @click="openMedia(row)">
+              <div class="preview-tile">
                 <el-image
                   v-if="mainImage(row)"
                   class="preview-image"
@@ -74,9 +74,8 @@
                   <i class="el-icon-video-camera" />
                   <span>无封面</span>
                 </div>
-                <span class="play-mark" title="预览视频"><i class="el-icon-video-play" /></span>
                 <span v-if="imageCount(row) > 1" class="image-count">{{ imageCount(row) }}</span>
-              </button>
+              </div>
             </div>
           </template>
         </el-table-column>
@@ -122,9 +121,6 @@
       </div>
     </el-card>
 
-    <el-dialog title="视频预览" :visible.sync="mediaVisible" width="760px" @closed="activeMedia = null">
-      <video v-if="activeMedia" class="media-preview" :src="activeMedia.url" controls autoplay />
-    </el-dialog>
   </div>
 </template>
 
@@ -156,9 +152,7 @@ export default {
       selectedIds: [],
       failedPreviewImages: {},
       jumpPage: 1,
-      jumpingPage: false,
-      mediaVisible: false,
-      activeMedia: null
+      jumpingPage: false
     }
   },
   computed: {
@@ -395,7 +389,8 @@ export default {
       return images.find(item => failed.indexOf(item) < 0)
     },
     imageCandidates(row) {
-      return [row.cover_image, row.preview_image].concat(row.extra_images || []).filter(Boolean)
+      const groupedImages = row.grouped_id ? (row.extra_images || []) : []
+      return [row.cover_image].concat(groupedImages, row.preview_image).filter(Boolean)
     },
     imageCount(row) {
       return this.imageCandidates(row).length
@@ -410,14 +405,6 @@ export default {
     previewImageUrl(path) {
       const token = this.form.token ? `&token=${encodeURIComponent(this.form.token)}` : ''
       return `${getRuntimeBaseUrl()}/preview/image?output_dir=${encodeURIComponent(this.form.outputDir)}&path=${encodeURIComponent(path)}${token}`
-    },
-    streamUrl(row) {
-      const token = this.form.token ? `&token=${encodeURIComponent(this.form.token)}` : ''
-      return `${getRuntimeBaseUrl()}/preview/stream?api_id=${encodeURIComponent(this.form.apiId)}&api_hash=${encodeURIComponent(this.form.apiHash)}&output_dir=${encodeURIComponent(this.form.outputDir)}&channel=${encodeURIComponent(this.form.channel)}&message_id=${encodeURIComponent(row.message_id)}${token}`
-    },
-    openMedia(row) {
-      this.activeMedia = { url: this.streamUrl(row) }
-      this.mediaVisible = true
     },
     titleText(row) {
       return row.title || row.file_name || '未命名资源'
@@ -509,15 +496,9 @@ export default {
     width: 224px;
     height: 126px;
     margin: 0 auto;
-    cursor: pointer;
     border-radius: 4px;
     background: #f3f4f6;
     box-shadow: inset 0 0 0 1px #ebeef5;
-  }
-
-  .preview-tile:hover .play-mark {
-    background: #409eff;
-    color: #fff;
   }
 
   .preview-image,
@@ -543,22 +524,6 @@ export default {
 
   .no-image {
     color: #909399;
-  }
-
-  .play-mark {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    width: 26px;
-    height: 26px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(255, 255, 255, 0.9);
-    color: #606266;
-    transition: background 0.15s ease, color 0.15s ease;
   }
 
   .image-count {
@@ -607,10 +572,5 @@ export default {
     width: 118px;
   }
 
-  .media-preview {
-    width: 100%;
-    max-height: 70vh;
-    background: #000;
-  }
 }
 </style>

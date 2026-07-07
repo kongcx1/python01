@@ -1368,6 +1368,7 @@ async def list_videos(
     max_extra_images: int = 3,
     max_thumb_attempts: int = 4,
     preview_thumb_total_timeout: float = 3,
+    allow_nearby_extra_images: bool = True,
     get_phone_cb: Optional[Callable[[], str]] = None,
     get_code_cb: Optional[Callable[[], str]] = None,
     get_password_cb: Optional[Callable[[], str]] = None,
@@ -1609,7 +1610,7 @@ async def list_videos(
 
             preview_path = None
             thumb_deadline = time.monotonic() + max(0.1, preview_thumb_total_timeout)
-            thumb_indexes = (0, -1, 1, 2)[: max(1, min(4, max_thumb_attempts))]
+            thumb_indexes = (-1, 0, 1, 2)[: max(1, min(4, max_thumb_attempts))]
             for thumb_index in thumb_indexes:
                 if time.monotonic() >= thumb_deadline:
                     break
@@ -1645,7 +1646,7 @@ async def list_videos(
                 img_path = await download_image(message, f"{message.id}_img.jpg")
                 if img_path:
                     extra_images.append(img_path.relative_to(output_dir).as_posix())
-            if not extra_images and not deadline_expired():
+            if allow_nearby_extra_images and not extra_images and not deadline_expired():
                 # Fallback: scan nearby messages by time window
                 nearby_ids = list(range(max(1, message.id - 10), message.id + 11))
                 timeout = remaining_timeout(nearby_lookup_timeout)

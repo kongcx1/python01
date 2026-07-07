@@ -50,7 +50,6 @@
               <div class="cover-wrap">
                 <el-image v-if="mainImage(row)" class="cover" :src="imageUrl(row, mainImage(row))" fit="cover" />
                 <div v-else class="cover empty-cover">无封面</div>
-                <span class="play-mark"><i class="el-icon-video-play" /></span>
               </div>
             </div>
           </template>
@@ -252,7 +251,10 @@ export default {
       }
     },
     mainImage(row) {
-      return row.preview_image || row.cover_image || (row.cover_files && row.cover_files[0]) || (row.extra_images && row.extra_images[0])
+      const images = [row.cover_image]
+        .concat(row.preview_image, row.cover_files || [], row.extra_images || [])
+        .filter(Boolean)
+      return images[0]
     },
     imageUrl(row, path) {
       const outputDir = row.output_dir || this.form.outputDir
@@ -498,22 +500,6 @@ export default {
     align-items: center;
     justify-content: center;
     color: $textSecondary;
-  }
-
-  .play-mark {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    width: 26px;
-    height: 26px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(255, 255, 255, 0.9);
-    color: #606266;
-    pointer-events: none;
   }
 
   .resource-title {
