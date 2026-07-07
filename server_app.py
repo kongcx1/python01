@@ -25,7 +25,7 @@ from telethon import TelegramClient
 from telethon.errors import FloodWaitError, RPCError, SessionPasswordNeededError, PhoneNumberInvalidError
 from pydantic import BaseModel, Field
 
-from downloader_core import build_client, extract_tags, is_filtered_caption, list_videos, message_caption, pick_file_name, read_manifest, remove_manifest_entry, run_download
+from downloader_core import build_client, drain_preview_media_tasks, extract_tags, is_filtered_caption, list_videos, message_caption, pick_file_name, read_manifest, remove_manifest_entry, run_download
 from server_upload import UploadClient
 
 
@@ -3155,6 +3155,7 @@ async def _close_client(client: TelegramClient) -> None:
 
     sender = getattr(client, "_sender", None)
     connection = getattr(sender, "_connection", None) if sender is not None else None
+    await drain_preview_media_tasks(timeout=4)
     try:
         await _maybe_await(client.disconnect())
     except BaseException:

@@ -36,6 +36,49 @@ def _get_concurrency() -> int:
 DEFAULT_DOWNLOAD_TIMEOUT_SEC = int(
     os.getenv("TELEGRAM_DOWNLOAD_TIMEOUT_SEC", "60")
 )
+_preview_media_tasks: set[asyncio.Task] = set()
+
+
+def _track_preview_media_task(task: asyncio.Task) -> asyncio.Task:
+    _preview_media_tasks.add(task)
+
+    def _consume_result(done_task: asyncio.Task) -> None:
+        _preview_media_tasks.discard(done_task)
+        if done_task.cancelled():
+            return
+        try:
+            done_task.exception()
+        except BaseException:
+            pass
+
+    task.add_done_callback(_consume_result)
+    return task
+
+
+async def drain_preview_media_tasks(timeout: float = 4.0) -> None:
+    tasks = [task for task in list(_preview_media_tasks) if not task.done()]
+    if not tasks:
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=timeout,
+        )
+        return
+    except asyncio.TimeoutError:
+        pass
+    except BaseException:
+        return
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=1,
+        )
+    except BaseException:
+        pass
 
 
 def _is_telethon_internal_task(task: asyncio.Task) -> bool:
@@ -119,6 +162,7 @@ async def close_client(client: TelegramClient) -> None:
 
     sender = getattr(client, "_sender", None)
     connection = getattr(sender, "_connection", None) if sender is not None else None
+    await drain_preview_media_tasks(timeout=4)
     try:
         await _maybe_await(client.disconnect())
     except BaseException:
@@ -1377,14 +1421,13 @@ async def list_videos(
         timeout = remaining_timeout(preview_media_timeout)
         if timeout is not None and timeout <= 0:
             return None
-        download_task = asyncio.create_task(
+        download_task = _track_preview_media_task(asyncio.create_task(
             client.download_media(
                 message,
                 file=str(target),
                 thumb=thumb_index,
             )
-        )
-        download_task.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+        ))
         try:
             result = await asyncio.wait_for(
                 asyncio.shield(download_task),
@@ -1418,8 +1461,9 @@ async def list_videos(
         timeout = remaining_timeout(preview_media_timeout)
         if timeout is not None and timeout <= 0:
             return None
-        download_task = asyncio.create_task(client.download_media(message, file=str(target)))
-        download_task.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+        download_task = _track_preview_media_task(
+            asyncio.create_task(client.download_media(message, file=str(target)))
+        )
         try:
             result = await asyncio.wait_for(
                 asyncio.shield(download_task),
