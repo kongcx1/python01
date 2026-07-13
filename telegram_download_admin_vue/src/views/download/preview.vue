@@ -31,7 +31,11 @@
         </div>
         <div class="filter-item">
           <span class="filter-label">频道：</span>
-          <el-input v-model="form.channel" size="small" placeholder="输入关键词" @change="handleChannelChange" />
+          <el-input v-model="form.channel" size="small" placeholder="@channel 或 t.me/channel" @change="handleSourceChange" />
+        </div>
+        <div class="filter-item">
+          <span class="filter-label">Chat ID：</span>
+          <el-input v-model="form.chatId" size="small" placeholder="-100xxxxxxxxxx" @change="handleSourceChange" />
         </div>
         <div class="filter-item">
           <span class="filter-label">加载条数：</span>
@@ -156,8 +160,11 @@ export default {
     }
   },
   computed: {
+    activeChannel() {
+      return String(this.form.chatId || '').trim() || String(this.form.channel || '').trim()
+    },
     ready() {
-      return hasLoginFields(this.form) && Boolean(this.form.channel)
+      return hasLoginFields(this.form) && Boolean(this.activeChannel)
     },
     visibleItems() {
       let items = this.previewItems.slice()
@@ -204,7 +211,7 @@ export default {
       if (!raw) return
       try {
         const state = JSON.parse(raw)
-        if (state.channel !== this.form.channel || state.outputDir !== this.form.outputDir) return
+        if (state.channel !== this.activeChannel || state.outputDir !== this.form.outputDir) return
         this.previewPage = Number(state.previewPage || 1)
         this.jumpPage = this.previewPage
         this.previewHasMore = Boolean(state.previewHasMore)
@@ -219,7 +226,7 @@ export default {
       localStorage.setItem(
         PreviewStateKey,
         JSON.stringify({
-          channel: this.form.channel,
+          channel: this.activeChannel,
           outputDir: this.form.outputDir,
           previewPage: this.previewPage,
           previewHasMore: this.previewHasMore,
@@ -241,7 +248,7 @@ export default {
       this.selectedIds = []
       localStorage.removeItem(PreviewStateKey)
     },
-    handleChannelChange() {
+    handleSourceChange() {
       this.resetPreviewPaging()
       this.saveLocalForm()
       this.syncSelectedRows()
@@ -274,10 +281,11 @@ export default {
           api_id: this.form.apiId,
           api_hash: this.form.apiHash,
           output_dir: this.form.outputDir,
-          channel: this.form.channel,
+          channel: this.activeChannel,
           limit: Number(this.loadCount || this.form.previewLimit || 30),
           offset: 0,
-          offset_id: this.previewCursors[page] || null
+          offset_id: this.previewCursors[page] || null,
+          min_video_duration_seconds: Number(this.form.minDuration || 0)
         })
         this.previewItems = data.items || []
         this.failedPreviewImages = {}
@@ -360,7 +368,7 @@ export default {
       this.creatingTask = true
       try {
         await createTask({
-          channel: this.form.channel,
+          channel: this.activeChannel,
           api_id: this.form.apiId,
           api_hash: this.form.apiHash,
           upload_account: this.form.uploadAccount,
@@ -370,7 +378,8 @@ export default {
           output_dir: this.form.outputDir,
           auto_upload: true,
           upload_meta: this.boolValue(this.form.uploadMeta),
-          video_type_threshold_seconds: Number(this.form.shortThreshold || 0)
+          video_type_threshold_seconds: Number(this.form.shortThreshold || 0),
+          min_video_duration_seconds: Number(this.form.minDuration || 0)
         })
         this.$message.success('下载任务已创建')
       } finally {

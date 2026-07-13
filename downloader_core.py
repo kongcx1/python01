@@ -11,8 +11,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Iterable, Optional
 
-from telethon import TelegramClient
+from telethon import TelegramClient, utils
 from telethon.errors import RPCError, SessionPasswordNeededError
+from telethon.tl.functions.contacts import ResolveUsernameRequest
 from telethon.tl.types import DocumentAttributeVideo
 
 
@@ -20,6 +21,16 @@ TAG_PATTERN = re.compile(r"#([^\s#]+)")
 AD_TEXT_STRIP_PATTERN = re.compile(r"[\s*_|\-—·,，.。:：;；!！?？【】\[\]()（）]+")
 MANIFEST_NAME = "manifest.csv"
 CONFIG_NAME = "config.json"
+MIN_VIDEO_DURATION_SECONDS = int(os.getenv("MIN_VIDEO_DURATION_SECONDS", "10"))
+
+
+def _is_too_short_video(
+    message, min_duration_seconds: int = MIN_VIDEO_DURATION_SECONDS
+) -> bool:
+    duration = _extract_duration(message)
+    return duration is not None and duration < min_duration_seconds
+
+
 def _get_part_size_kb() -> int:
     try:
         part_kb = max(1, int(os.getenv("TELEGRAM_DOWNLOAD_PART_KB", "512")))
@@ -290,6 +301,7 @@ def is_filtered_caption(text: str) -> bool:
     if not normalized:
         return False
     strong_keywords = (
+        "8k2462com",
         "2028体育",
         "tg全网最大信誉台",
         "全网最大信誉台",
@@ -298,6 +310,10 @@ def is_filtered_caption(text: str) -> bool:
     if any(keyword in normalized for keyword in strong_keywords):
         return True
     keyword_groups = (
+        ("8k国际", "u投首选综合平台"),
+        ("8k国际", "百亿大盘", "值得信赖"),
+        ("不限ip免实名网址", "大额出款"),
+        ("8k2462com", "大额出款"),
         ("玩家首选", "千万秒出"),
         ("绿茵盛宴", "资金流动速度"),
         ("信誉台", "千万秒出"),
@@ -321,6 +337,119 @@ def _channel_slug(channel: str) -> str:
     raw = raw.replace("/", "_")
     slug = safe_filename(raw).replace(" ", "_")
     return (slug or "channel")[:50]
+
+
+def _telegram_id_candidates(channel: str) -> set[int]:
+    text = str(channel or "").strip()
+    if not re.fullmatch(r"-?\d+", text):
+        return set()
+    value = int(text)
+    candidates = {value, abs(value)}
+    if value > 0:
+        candidates.add(int(f"-100{value}"))
+    if text.startswith("-100") and len(text) > 4:
+        try:
+            candidates.add(int(text[4:]))
+        except ValueError:
+            pass
+    return candidates
+
+
+def _normalize_telegram_channel(channel: str) -> str:
+    text = str(channel or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        text = text[1:-1].strip()
+    if text.startswith("http://") or text.startswith("https://"):
+        clean = text.split("?", 1)[0].rstrip("/")
+        parts = [part for part in clean.split("/") if part]
+        host_index = next(
+            (
+                index
+                for index, part in enumerate(parts)
+                if part.lower() in {"t.me", "telegram.me", "www.t.me"}
+            ),
+            -1,
+        )
+        tail = parts[host_index + 1 :] if host_index >= 0 else parts
+        if len(tail) >= 2 and tail[0].lower() == "c" and tail[1].isdigit():
+            text = f"-100{tail[1]}"
+        elif tail:
+            text = tail[0]
+    if text.startswith("@"):
+        text = text[1:]
+    return text.strip()
+
+
+def _resolved_peer_id(peer) -> Optional[int]:
+    for attr in ("channel_id", "chat_id", "user_id"):
+        value = getattr(peer, attr, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+async def _resolve_username_input_entity(client: TelegramClient, username: str):
+    resolved = await client(ResolveUsernameRequest(username))
+    peer_id = _resolved_peer_id(getattr(resolved, "peer", None))
+    entities = list(getattr(resolved, "chats", None) or []) + list(
+        getattr(resolved, "users", None) or []
+    )
+    for entity in entities:
+        if peer_id is not None and getattr(entity, "id", None) != peer_id:
+            continue
+        try:
+            return utils.get_input_peer(entity)
+        except Exception:
+            return await client.get_input_entity(entity)
+    return None
+
+
+async def _resolve_telegram_entity(client: TelegramClient, channel: str):
+    text = _normalize_telegram_channel(channel)
+    if not text:
+        raise RuntimeError("Telegram 频道不能为空。")
+    if not re.fullmatch(r"-?\d+", text):
+        target_username = text.lower().lstrip("@")
+        async for dialog in client.iter_dialogs():
+            entity = getattr(dialog, "entity", None)
+            input_entity = getattr(dialog, "input_entity", None)
+            username = str(getattr(entity, "username", "") or "").lower()
+            if username and username == target_username:
+                try:
+                    return utils.get_input_peer(entity)
+                except Exception:
+                    return input_entity or entity
+        resolved_entity = await _resolve_username_input_entity(client, target_username)
+        if resolved_entity is not None:
+            return resolved_entity
+        try:
+            return await client.get_input_entity(f"@{target_username}")
+        except Exception:
+            return await client.get_input_entity(text)
+    candidates = _telegram_id_candidates(text)
+    async for dialog in client.iter_dialogs():
+        entity = getattr(dialog, "entity", None)
+        input_entity = getattr(dialog, "input_entity", None)
+        entity_id = getattr(entity, "id", None)
+        peer_id = None
+        try:
+            peer_id = utils.get_peer_id(entity)
+        except Exception:
+            pass
+        if (
+            (isinstance(entity_id, int) and entity_id in candidates)
+            or (isinstance(peer_id, int) and peer_id in candidates)
+        ):
+            return input_entity or entity
+    value = int(text)
+    try:
+        return await client.get_input_entity(value)
+    except Exception:
+        pass
+    raise RuntimeError(
+        f"找不到 Chat ID {text} 对应的 Telegram 实体。请确认当前登录账号已加入该频道/群，"
+        "或改用 @用户名 / t.me 链接加载。"
+    )
 
 
 def pick_file_name(message, channel: str) -> str:
@@ -913,6 +1042,7 @@ async def download_videos(
     progress_cb: Optional[Callable[[dict], None]] = None,
     pause_event: Optional[threading.Event] = None,
     stop_event: Optional[threading.Event] = None,
+    min_video_duration_seconds: int = MIN_VIDEO_DURATION_SECONDS,
     get_phone_cb: Optional[Callable[[], str]] = None,
     get_code_cb: Optional[Callable[[], str]] = None,
     get_password_cb: Optional[Callable[[], str]] = None,
@@ -1012,7 +1142,8 @@ async def download_videos(
         )
         if status_cb:
             status_cb("正在获取频道消息...")
-        messages = client.iter_messages(channel, limit=None)
+        entity = await _resolve_telegram_entity(client, channel)
+        messages = client.iter_messages(entity, limit=None)
         to_download = []
         async for message in messages:
             if len(to_download) >= max_videos:
@@ -1023,6 +1154,12 @@ async def download_videos(
                 and message.document.mime_type
                 and message.document.mime_type.startswith("video/")
             ):
+                continue
+            if _is_too_short_video(message, min_video_duration_seconds):
+                if status_cb:
+                    status_cb(
+                        f"视频时长小于 {min_video_duration_seconds} 秒，跳过：{message.id}"
+                    )
                 continue
 
             if not in_date_range(message.date):
@@ -1067,11 +1204,17 @@ async def download_videos(
             await wait_if_paused()
 
             try:
-                refreshed = await client.get_messages(channel, ids=message.id)
+                refreshed = await client.get_messages(entity, ids=message.id)
                 if refreshed:
                     message = refreshed
             except Exception:
                 pass
+            if _is_too_short_video(message, min_video_duration_seconds):
+                if status_cb:
+                    status_cb(
+                        f"视频时长小于 {min_video_duration_seconds} 秒，跳过：{message.id}"
+                    )
+                return
             caption = message_caption(message)
             group_messages = None
             if message.grouped_id is not None:
@@ -1084,7 +1227,7 @@ async def download_videos(
                 for i in range(0, len(ids), chunk_size):
                     chunk = ids[i : i + chunk_size]
                     try:
-                        batch = await client.get_messages(channel, ids=chunk)
+                        batch = await client.get_messages(entity, ids=chunk)
                     except Exception:
                         batch = []
                     fetched.extend(batch)
@@ -1096,7 +1239,7 @@ async def download_videos(
                 if not group_messages:
                     # Fallback: scan nearby messages in time order
                     async for msg in client.iter_messages(
-                        channel, offset_id=message.id + 1, limit=200
+                        entity, offset_id=message.id + 1, limit=200
                     ):
                         if msg.grouped_id == message.grouped_id:
                             group_messages.append(msg)
@@ -1105,14 +1248,14 @@ async def download_videos(
             elif message.reply_to and getattr(message.reply_to, "reply_to_msg_id", None):
                 try:
                     parent = await client.get_messages(
-                        channel, ids=message.reply_to.reply_to_msg_id
+                        entity, ids=message.reply_to.reply_to_msg_id
                     )
                 except Exception:
                     parent = None
                 if parent and parent.grouped_id is not None:
                     group_messages = []
                     async for msg in client.iter_messages(
-                        channel, offset_id=parent.id + 1, limit=200
+                        entity, offset_id=parent.id + 1, limit=200
                     ):
                         if msg.grouped_id == parent.grouped_id:
                             group_messages.append(msg)
@@ -1219,7 +1362,7 @@ async def download_videos(
             async def _stream_fallback() -> None:
                 if status_cb:
                     status_cb(f"分片下载中：{target_path.name}")
-                refreshed = await client.get_messages(channel, ids=message.id)
+                refreshed = await client.get_messages(entity, ids=message.id)
                 if isinstance(refreshed, (list, tuple)):
                     msg = refreshed[0] if refreshed else message
                 else:
@@ -1265,8 +1408,8 @@ async def download_videos(
                             status_cb=status_cb,
                             file_label=target_path.name,
                             expected_size=expected_size,
-                            refresh_cb=lambda: client.get_messages(
-                                channel, ids=message.id
+                                refresh_cb=lambda: client.get_messages(
+                                    entity, ids=message.id
                             ),
                             stream_fallback=_stream_fallback,
                             pause_cb=(
@@ -1369,6 +1512,7 @@ async def list_videos(
     max_thumb_attempts: int = 4,
     preview_thumb_total_timeout: float = 3,
     allow_nearby_extra_images: bool = True,
+    min_video_duration_seconds: int = MIN_VIDEO_DURATION_SECONDS,
     get_phone_cb: Optional[Callable[[], str]] = None,
     get_code_cb: Optional[Callable[[], str]] = None,
     get_password_cb: Optional[Callable[[], str]] = None,
@@ -1507,10 +1651,11 @@ async def list_videos(
         )
         if status_cb:
             status_cb("正在扫描频道视频...")
+        entity = await _resolve_telegram_entity(client, channel)
         if offset_id:
-            messages = client.iter_messages(channel, limit=None, offset_id=offset_id)
+            messages = client.iter_messages(entity, limit=None, offset_id=offset_id)
         else:
-            messages = client.iter_messages(channel, limit=None)
+            messages = client.iter_messages(entity, limit=None)
         skipped = 0
         scanned = 0
         scan_limited = False
@@ -1561,7 +1706,7 @@ async def list_videos(
                 group_messages = []
                 try:
                     async for msg in client.iter_messages(
-                        channel,
+                        entity,
                         min_id=max(0, message.id - 30),
                         max_id=message.id + 30,
                     ):
@@ -1580,7 +1725,7 @@ async def list_videos(
                 timeout = remaining_timeout(0.8)
                 try:
                     nearby_messages = await asyncio.wait_for(
-                        client.get_messages(channel, ids=nearby_ids),
+                        client.get_messages(entity, ids=nearby_ids),
                         timeout=timeout,
                     )
                 except Exception:
@@ -1604,6 +1749,8 @@ async def list_videos(
                     if isinstance(attr, DocumentAttributeVideo):
                         duration = attr.duration
                         break
+            if duration is not None and duration < min_video_duration_seconds:
+                continue
             if offset and skipped < offset:
                 skipped += 1
                 continue
@@ -1652,7 +1799,7 @@ async def list_videos(
                 timeout = remaining_timeout(nearby_lookup_timeout)
                 try:
                     nearby = await asyncio.wait_for(
-                        client.get_messages(channel, ids=nearby_ids),
+                        client.get_messages(entity, ids=nearby_ids),
                         timeout=timeout,
                     )
                 except Exception:
@@ -1730,6 +1877,7 @@ def run_download(
     progress_cb: Optional[Callable[[dict], None]] = None,
     pause_event: Optional[threading.Event] = None,
     stop_event: Optional[threading.Event] = None,
+    min_video_duration_seconds: int = MIN_VIDEO_DURATION_SECONDS,
     get_phone_cb: Optional[Callable[[], str]] = None,
     get_code_cb: Optional[Callable[[], str]] = None,
     get_password_cb: Optional[Callable[[], str]] = None,
@@ -1754,6 +1902,7 @@ def run_download(
             progress_cb=progress_cb,
             pause_event=pause_event,
             stop_event=stop_event,
+            min_video_duration_seconds=min_video_duration_seconds,
             get_phone_cb=get_phone_cb,
             get_code_cb=get_code_cb,
             get_password_cb=get_password_cb,

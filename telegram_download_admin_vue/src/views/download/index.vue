@@ -53,6 +53,10 @@
               <el-input-number v-model="form.shortThreshold" :min="0" controls-position="right" @change="saveLocalForm" />
               <span class="muted unit-text">秒</span>
             </el-form-item>
+            <el-form-item label="过滤时长">
+              <el-input-number v-model="form.minDuration" :min="0" controls-position="right" @change="saveLocalForm" />
+              <span class="muted unit-text">秒以下不展示/不上传</span>
+            </el-form-item>
             <el-form-item label="每页条数">
               <el-input-number v-model="form.previewLimit" :min="1" :max="50" controls-position="right" @change="saveLocalForm" />
             </el-form-item>
@@ -104,6 +108,12 @@ export default {
         if (data.upload_account) this.form.uploadAccount = data.upload_account
         if (data.upload_password) this.form.uploadPassword = data.upload_password
         if (data.upload_api_token) this.form.uploadApiToken = data.upload_api_token
+        if (data.video_type_threshold_seconds !== undefined && data.video_type_threshold_seconds !== null) {
+          this.form.shortThreshold = Number(data.video_type_threshold_seconds)
+        }
+        if (data.min_video_duration_seconds !== undefined && data.min_video_duration_seconds !== null) {
+          this.form.minDuration = Number(data.min_video_duration_seconds)
+        }
         this.saveLocalForm()
       } catch (error) {
         // 后端未启动或未配置 token 时，保留本地表单可用。
@@ -122,7 +132,9 @@ export default {
           telegram_download_concurrency: Number(this.form.concurrency || 1),
           upload_account: this.form.uploadAccount,
           upload_password: this.form.uploadPassword,
-          upload_api_token: this.form.uploadApiToken
+          upload_api_token: this.form.uploadApiToken,
+          video_type_threshold_seconds: Number(this.form.shortThreshold || 0),
+          min_video_duration_seconds: Number(this.form.minDuration || 0)
         })
         this.saveLocalForm()
         this.$message.success('配置已保存')

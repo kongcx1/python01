@@ -157,7 +157,8 @@ export default {
           channel: this.form.channel,
           limit: Number(this.form.previewLimit || 30),
           offset: 0,
-          offset_id: this.previewCursors[page] || null
+          offset_id: this.previewCursors[page] || null,
+          min_video_duration_seconds: Number(this.form.minDuration || 0)
         })
         this.previewItems = data.items || []
         this.previewPage = page
@@ -215,7 +216,8 @@ export default {
           output_dir: this.form.outputDir,
           auto_upload: true,
           upload_meta: this.boolValue(this.form.uploadMeta),
-          video_type_threshold_seconds: Number(this.form.shortThreshold || 0)
+          video_type_threshold_seconds: Number(this.form.shortThreshold || 0),
+          min_video_duration_seconds: Number(this.form.minDuration || 0)
         })
         this.$message.success('下载任务已创建')
         this.$router.push('/download/tasks')

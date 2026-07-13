@@ -483,8 +483,8 @@ class UploadClient:
         category: str,
         content: str,
         tags: list[str],
-        thumbnail_id: int,
         video_id: int,
+        thumbnail_id: int = 0,
     ) -> None:
         if not self.movie_create_url:
             self._log("未配置 movie create 接口，跳过影片记录上传。")
@@ -501,9 +501,12 @@ class UploadClient:
             "category": category,
             "content": content,
             "tags": tags,
-            "thumbnail_id": thumbnail_id,
             "video_id": video_id,
         }
+        if thumbnail_id > 0:
+            payload["thumbnail_id"] = thumbnail_id
+            payload["cover_id"] = thumbnail_id
+            payload["thumb_id"] = thumbnail_id
         payload = _repair_mojibake_value(payload)  # type: ignore[assignment]
         if self.debug:
             self._log(f"影片记录请求体: {payload}")

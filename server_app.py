@@ -21,8 +21,9 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Web
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from telethon import TelegramClient
+from telethon import TelegramClient, utils
 from telethon.errors import FloodWaitError, RPCError, SessionPasswordNeededError, PhoneNumberInvalidError
+from telethon.tl.functions.contacts import ResolveUsernameRequest
 from pydantic import BaseModel, Field
 
 from downloader_core import build_client, drain_preview_media_tasks, extract_tags, is_filtered_caption, list_videos, message_caption, pick_file_name, read_manifest, remove_manifest_entry, run_download
@@ -43,11 +44,12 @@ DEFAULT_UPLOAD_BASE_URL = "https://userapi.sfthyf.cn"
 DEFAULT_VIDEO_META_URL = "https://userapi.sfthyf.cn/api/short/create"
 DEFAULT_MOVIE_CREATE_URL = "https://userapi.sfthyf.cn/api/movie/create"
 DEFAULT_VIDEO_TYPE_THRESHOLD_SECONDS = 600
+MIN_VIDEO_DURATION_SECONDS = int(os.getenv("MIN_VIDEO_DURATION_SECONDS", "10"))
 PREVIEW_SOFT_TIMEOUT_SECONDS = 18
 PREVIEW_HARD_TIMEOUT_SECONDS = 24
 AUTH_STATUS_TIMEOUT_SECONDS = 8
 SPARK_MD5_HELPER = Path(__file__).resolve().parent / "tools" / "spark_md5_file.js"
-SERVER_CODE_VERSION = "2026-07-07-shutdown-md5-log-v2"
+SERVER_CODE_VERSION = "2026-07-11-resolve-username-entity-v11"
 _server_version_cache: Optional[str] = None
 _db_init_lock = threading.Lock()
 _db_initialized = False
@@ -309,7 +311,15 @@ def _load_config() -> dict:
     config.setdefault("video_meta_url", DEFAULT_VIDEO_META_URL)
     config.setdefault("movie_create_url", DEFAULT_MOVIE_CREATE_URL)
     config.setdefault("video_type_threshold_seconds", DEFAULT_VIDEO_TYPE_THRESHOLD_SECONDS)
+    config.setdefault("min_video_duration_seconds", MIN_VIDEO_DURATION_SECONDS)
     return config
+
+
+def _coerce_non_negative_int(value: object, default: int) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _save_config(config: dict) -> None:
@@ -396,6 +406,7 @@ def _ensure_db() -> None:
                 end_date TEXT,
                 output_dir TEXT,
                 video_type_threshold_seconds INTEGER,
+                min_video_duration_seconds INTEGER,
                 auto_upload INTEGER,
                 upload_meta INTEGER,
                 created_at TEXT,
@@ -407,6 +418,10 @@ def _ensure_db() -> None:
         )
         try:
             conn.execute("ALTER TABLE tasks ADD COLUMN video_type_threshold_seconds INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN min_video_duration_seconds INTEGER")
         except sqlite3.OperationalError:
             pass
         conn.execute(
@@ -743,6 +758,7 @@ def _create_task(
     end_date: Optional[str],
     output_dir: Optional[str],
     video_type_threshold_seconds: Optional[int],
+    min_video_duration_seconds: Optional[int],
     auto_upload: bool,
     upload_meta: bool,
 ) -> int:
@@ -752,9 +768,9 @@ def _create_task(
             """
             INSERT INTO tasks (
                 status, channel, message_ids, start_date, end_date, output_dir,
-                video_type_threshold_seconds,
+                video_type_threshold_seconds, min_video_duration_seconds,
                 auto_upload, upload_meta, created_at, updated_at, progress_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "pending",
@@ -764,6 +780,7 @@ def _create_task(
                 end_date,
                 output_dir,
                 video_type_threshold_seconds,
+                min_video_duration_seconds,
                 int(auto_upload),
                 int(upload_meta),
                 now,
@@ -784,6 +801,7 @@ def _create_task(
             "end_date": end_date,
             "output_dir": output_dir,
             "video_type_threshold_seconds": video_type_threshold_seconds,
+            "min_video_duration_seconds": min_video_duration_seconds,
             "auto_upload": int(auto_upload),
             "upload_meta": int(upload_meta),
             "created_at": now,
@@ -914,6 +932,127 @@ def _message_mime_type(message) -> str:
     return "video/mp4"
 
 
+def _movie_title_from_content(content: str, fallback: str = "") -> str:
+    text = re.sub(r"\s+", " ", str(content or "")).strip()
+    text = re.sub(r"^[#\s,，.。:：;；!！?？、|｜_\-—·]+", "", text).strip()
+    if not text:
+        text = str(fallback or "").strip()
+    return text[:10] or "未命名"
+
+
+def _telegram_id_candidates(channel: str) -> set[int]:
+    text = str(channel or "").strip()
+    if not re.fullmatch(r"-?\d+", text):
+        return set()
+    value = int(text)
+    candidates = {value, abs(value)}
+    if value > 0:
+        candidates.add(int(f"-100{value}"))
+    if text.startswith("-100") and len(text) > 4:
+        try:
+            candidates.add(int(text[4:]))
+        except ValueError:
+            pass
+    return candidates
+
+
+def _normalize_telegram_channel(channel: str) -> str:
+    text = str(channel or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        text = text[1:-1].strip()
+    if text.startswith("http://") or text.startswith("https://"):
+        clean = text.split("?", 1)[0].rstrip("/")
+        parts = [part for part in clean.split("/") if part]
+        host_index = next(
+            (
+                index
+                for index, part in enumerate(parts)
+                if part.lower() in {"t.me", "telegram.me", "www.t.me"}
+            ),
+            -1,
+        )
+        tail = parts[host_index + 1 :] if host_index >= 0 else parts
+        if len(tail) >= 2 and tail[0].lower() == "c" and tail[1].isdigit():
+            text = f"-100{tail[1]}"
+        elif tail:
+            text = tail[0]
+    if text.startswith("@"):
+        text = text[1:]
+    return text.strip()
+
+
+def _resolved_peer_id(peer) -> Optional[int]:
+    for attr in ("channel_id", "chat_id", "user_id"):
+        value = getattr(peer, attr, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+async def _resolve_username_input_entity(client: TelegramClient, username: str):
+    resolved = await client(ResolveUsernameRequest(username))
+    peer_id = _resolved_peer_id(getattr(resolved, "peer", None))
+    entities = list(getattr(resolved, "chats", None) or []) + list(
+        getattr(resolved, "users", None) or []
+    )
+    for entity in entities:
+        if peer_id is not None and getattr(entity, "id", None) != peer_id:
+            continue
+        try:
+            return utils.get_input_peer(entity)
+        except Exception:
+            return await client.get_input_entity(entity)
+    return None
+
+
+async def _resolve_telegram_entity(client: TelegramClient, channel: str):
+    text = _normalize_telegram_channel(channel)
+    if not text:
+        raise RuntimeError("Telegram 频道不能为空。")
+    if not re.fullmatch(r"-?\d+", text):
+        target_username = text.lower().lstrip("@")
+        async for dialog in client.iter_dialogs():
+            entity = getattr(dialog, "entity", None)
+            input_entity = getattr(dialog, "input_entity", None)
+            username = str(getattr(entity, "username", "") or "").lower()
+            if username and username == target_username:
+                try:
+                    return utils.get_input_peer(entity)
+                except Exception:
+                    return input_entity or entity
+        resolved_entity = await _resolve_username_input_entity(client, target_username)
+        if resolved_entity is not None:
+            return resolved_entity
+        try:
+            return await client.get_input_entity(f"@{target_username}")
+        except Exception:
+            return await client.get_input_entity(text)
+    candidates = _telegram_id_candidates(text)
+    async for dialog in client.iter_dialogs():
+        entity = getattr(dialog, "entity", None)
+        input_entity = getattr(dialog, "input_entity", None)
+        entity_id = getattr(entity, "id", None)
+        peer_id = None
+        try:
+            peer_id = utils.get_peer_id(entity)
+        except Exception:
+            pass
+        if (
+            (isinstance(entity_id, int) and entity_id in candidates)
+            or (isinstance(peer_id, int) and peer_id in candidates)
+        ):
+            return input_entity or entity
+    value = int(text)
+    try:
+        return await client.get_input_entity(value)
+    except Exception:
+        pass
+    raise RuntimeError(
+        f"找不到 Chat ID {text} 对应的 Telegram 实体。请确认当前登录账号已加入该频道/群，"
+        "或改用 @用户名 / t.me 链接加载。"
+    )
+
+
 def _message_file_size(message) -> int:
     candidates = [
         getattr(getattr(getattr(message, "media", None), "document", None), "size", None),
@@ -982,11 +1121,12 @@ def _image_media_type(path: Path) -> str:
 
 
 async def _resolve_message_caption(client: TelegramClient, channel: str, message) -> str:
+    entity = await _resolve_telegram_entity(client, channel)
     caption = message_caption(message)
     if caption:
         return caption
     try:
-        refreshed = await client.get_messages(channel, ids=message.id)
+        refreshed = await client.get_messages(entity, ids=message.id)
     except Exception:
         refreshed = None
     if refreshed:
@@ -999,7 +1139,7 @@ async def _resolve_message_caption(client: TelegramClient, channel: str, message
         return ""
     try:
         async for msg in client.iter_messages(
-            channel,
+            entity,
             min_id=max(0, int(message.id) - 200),
             max_id=int(message.id) + 200,
         ):
@@ -1049,16 +1189,35 @@ async def _upload_message_thumbnail(
                 pass
 
 
-def _is_uploadable_message(message) -> bool:
+def _task_min_video_duration_seconds(task: dict, config: Optional[dict] = None) -> int:
+    value = task.get("min_video_duration_seconds")
+    if value is None:
+        config = config or _load_config()
+        value = config.get("min_video_duration_seconds")
+    return _coerce_non_negative_int(value, MIN_VIDEO_DURATION_SECONDS)
+
+
+def _is_uploadable_message(
+    message, min_video_duration_seconds: int = MIN_VIDEO_DURATION_SECONDS
+) -> bool:
     if message is None:
         return False
     if is_filtered_caption(message_caption(message)):
+        return False
+    if _is_too_short_message(message, min_video_duration_seconds):
         return False
     if getattr(message, "video", None):
         return True
     document = getattr(message, "document", None)
     mime_type = getattr(document, "mime_type", "") if document else ""
     return bool(document and str(mime_type).startswith("video/"))
+
+
+def _is_too_short_message(
+    message, min_video_duration_seconds: int = MIN_VIDEO_DURATION_SECONDS
+) -> bool:
+    duration = _message_duration(message)
+    return duration is not None and duration < min_video_duration_seconds
 
 
 class TaskRunner:
@@ -1146,6 +1305,7 @@ class TaskRunner:
             os.environ["TELEGRAM_DOWNLOAD_CONCURRENCY"] = str(concurrency)
         if part_kb is not None:
             os.environ["TELEGRAM_DOWNLOAD_PART_KB"] = str(part_kb)
+        min_video_duration_seconds = _task_min_video_duration_seconds(task, config)
 
         channel = task["channel"]
         message_ids = json.loads(task["message_ids"] or "[]")
@@ -1340,6 +1500,7 @@ class TaskRunner:
                 allowed_ids=allowed_ids,
                 skip_cb=running.is_removed,
                 pause_cb=running.is_paused,
+                min_video_duration_seconds=min_video_duration_seconds,
                 get_phone_cb=_login_required,
                 get_code_cb=_login_required,
                 get_password_cb=_login_required,
@@ -1358,6 +1519,7 @@ class TaskRunner:
                         api_id=api_id,
                         api_hash=api_hash,
                         download_total=download_total,
+                        min_video_duration_seconds=min_video_duration_seconds,
                     )
                 )
 
@@ -1437,12 +1599,14 @@ class TaskRunner:
         api_id: str,
         api_hash: str,
         download_total: Optional[int],
+        min_video_duration_seconds: int,
     ) -> None:
         config = _load_config()
         base_url = config.get("upload_base_url")
         account = config.get("upload_account") or ""
         password = config.get("upload_password") or ""
         upload_meta = bool(task.get("upload_meta"))
+        min_video_duration_seconds = _task_min_video_duration_seconds(task, config)
         if not base_url:
             raise RuntimeError("æœªé…ç½®ä¸Šä¼ æœåŠ¡ï¼Œæ— æ³•ç›´æŽ¥ä¸Šä¼ ã€‚")
 
@@ -1489,8 +1653,9 @@ class TaskRunner:
         )
 
         async def _collect_messages(client: TelegramClient) -> list:
+            entity = await _resolve_telegram_entity(client, channel)
             if message_ids:
-                result = await client.get_messages(channel, ids=message_ids)
+                result = await client.get_messages(entity, ids=message_ids)
                 if result is None:
                     return []
                 if isinstance(result, (list, tuple)):
@@ -1500,7 +1665,7 @@ class TaskRunner:
             start_date = _parse_date(task.get("start_date"))
             end_date = _parse_date(task.get("end_date"))
             collected = []
-            async for message in client.iter_messages(channel, limit=100000):
+            async for message in client.iter_messages(entity, limit=100000):
                 if message is None:
                     continue
                 msg_date = message.date.date() if message.date else None
@@ -1508,7 +1673,13 @@ class TaskRunner:
                     break
                 if end_date and msg_date and msg_date > end_date:
                     continue
-                if _is_uploadable_message(message):
+                if _is_too_short_message(message, min_video_duration_seconds):
+                    _write_task_log(
+                        int(task["id"]),
+                        f"视频时长小于 {min_video_duration_seconds} 秒，跳过：{getattr(message, 'id', '')} duration={_message_duration(message)}s",
+                    )
+                    continue
+                if _is_uploadable_message(message, min_video_duration_seconds):
                     collected.append(message)
             return list(reversed(collected))
 
@@ -1518,7 +1689,16 @@ class TaskRunner:
             authorized = await client.is_user_authorized()
             if not authorized:
                 raise RuntimeError("æœåŠ¡å™¨æœªç™»å½• Telegramï¼Œè¯·å…ˆç™»å½•ã€‚")
-            messages = [msg for msg in await _collect_messages(client) if _is_uploadable_message(msg)]
+            messages = []
+            for msg in await _collect_messages(client):
+                if _is_too_short_message(msg, min_video_duration_seconds):
+                    _write_task_log(
+                        int(task["id"]),
+                        f"视频时长小于 {min_video_duration_seconds} 秒，跳过：{getattr(msg, 'id', '')} duration={_message_duration(msg)}s",
+                    )
+                    continue
+                if _is_uploadable_message(msg, min_video_duration_seconds):
+                    messages.append(msg)
             total_upload = len(messages)
             _merge_task_progress(
                 int(task["id"]),
@@ -1618,17 +1798,33 @@ class TaskRunner:
                     },
                 )
 
-                def _flood_wait_seconds(exc: FloodWaitError) -> int:
+                def _flood_wait_seconds(exc: BaseException) -> Optional[int]:
                     raw = getattr(exc, "seconds", None)
                     if raw is None:
                         raw = getattr(exc, "value", None)
                     try:
                         return max(1, int(raw))
                     except (TypeError, ValueError):
+                        pass
+                    text = " ".join(
+                        str(part or "")
+                        for part in (
+                            getattr(exc, "message", None),
+                            getattr(exc, "name", None),
+                            str(exc),
+                        )
+                    ).upper()
+                    match = re.search(r"FLOOD(?:_[A-Z]+)*_WAIT_(\d+)", text)
+                    if match:
+                        return max(1, int(match.group(1)))
+                    if getattr(exc, "code", None) == 420 and "FLOOD" in text:
                         return 60
+                    return None
 
-                async def _sleep_for_flood_wait(exc: FloodWaitError, sent_from_telegram: int) -> None:
+                async def _sleep_for_flood_wait(exc: BaseException, sent_from_telegram: int) -> None:
                     seconds = _flood_wait_seconds(exc)
+                    if seconds is None:
+                        raise exc
                     wait_text = f"Telegram 限流，等待 {seconds} 秒后继续：{message.id}"
                     _write_task_log(int(task["id"]), wait_text)
                     _merge_task_progress(
@@ -1664,7 +1860,7 @@ class TaskRunner:
                             return aiter, bytes(chunk)
                         except StopAsyncIteration:
                             return None, b""
-                        except FloodWaitError as exc:
+                        except (FloodWaitError, RPCError) as exc:
                             await _sleep_for_flood_wait(exc, sent_from_telegram)
 
                 async def _hash_telegram_media() -> tuple[Optional[str], int]:
@@ -1687,7 +1883,7 @@ class TaskRunner:
                                 hashed += len(chunk_bytes)
                                 digest.update(chunk_bytes)
                             break
-                        except FloodWaitError as exc:
+                        except (FloodWaitError, RPCError) as exc:
                             await _sleep_for_flood_wait(exc, hashed)
                             aiter, first_chunk = await _next_telegram_chunk(hashed, hashed)
                             if first_chunk:
@@ -1809,7 +2005,7 @@ class TaskRunner:
                                     md5_digest.update(chunk_bytes)
                                     await _put_queue_item(chunk_bytes)
                                 break
-                            except FloodWaitError as exc:
+                            except (FloodWaitError, RPCError) as exc:
                                 await _sleep_for_flood_wait(exc, sent_from_telegram)
                                 aiter, first_chunk = await _next_telegram_chunk(
                                     sent_from_telegram, sent_from_telegram
@@ -1945,11 +2141,10 @@ class TaskRunner:
                             if thumbnail_id <= 0:
                                 _write_task_log(
                                     int(task["id"]),
-                                    f"未获取到封面，跳过影片记录：{message.id}",
+                                    f"未获取到封面，继续创建影片记录：{message.id}",
                                 )
-                                continue
                             uploader.create_movie_record(
-                                title=Path(file_name).stem,
+                                title=_movie_title_from_content(content, Path(file_name).stem),
                                 category=config.get("movie_category_default") or "çºªå½•ç‰‡",
                                 content=content,
                                 tags=tags,
@@ -2083,13 +2278,15 @@ class TaskRunner:
                 _write_task_log(int(task["id"]), f"文件不存在，跳过上传: {path}")
                 continue
             expected_size = None
+            target_meta: dict = {}
             meta_path = output_dir / f"{path.stem}.json"
             if meta_path.exists():
                 try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                    expected_size = meta.get("file_size")
+                    target_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    expected_size = target_meta.get("file_size")
                 except Exception:
                     expected_size = None
+                    target_meta = {}
             if isinstance(expected_size, (int, float)) and expected_size > 0:
                 actual_size = path.stat().st_size
                 if actual_size < expected_size * 0.98:
@@ -2098,6 +2295,17 @@ class TaskRunner:
                         f"æ–‡ä»¶ä¸å®Œæ•´ï¼Œè·³è¿‡ä¸Šä¼ : {path.name} ({actual_size}/{int(expected_size)})",
                     )
                     continue
+            duration_value = target_meta.get("duration")
+            try:
+                duration_seconds = int(duration_value) if duration_value is not None else None
+            except (TypeError, ValueError):
+                duration_seconds = None
+            if duration_seconds is not None and duration_seconds < min_video_duration_seconds:
+                _write_task_log(
+                    int(task["id"]),
+                    f"视频时长小于 {min_video_duration_seconds} 秒，跳过上传：{path.name} duration={duration_seconds}s",
+                )
+                continue
             _merge_task_progress(
                 int(task["id"]),
                 {
@@ -2218,7 +2426,7 @@ class TaskRunner:
                 extra_images: list[str] = []
                 if meta_path.exists():
                     try:
-                        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                        meta = target_meta or json.loads(meta_path.read_text(encoding="utf-8"))
                         content = str(meta.get("caption") or meta.get("description") or "")
                         raw_title = str(meta.get("title") or title)
                         title = Path(raw_title).stem or raw_title
@@ -2285,7 +2493,7 @@ class TaskRunner:
                     if uploader.movie_create_url:
                         try:
                             uploader.create_movie_record(
-                                title=title or path.stem,
+                                title=_movie_title_from_content(content, title or path.stem),
                                 category=category or "çºªå½•ç‰‡",
                                 content=content,
                                 tags=tags,
@@ -2404,6 +2612,7 @@ class TaskRequest(BaseModel):
     end_date: Optional[str] = Field(default=None, description="YYYY-MM-DD")
     output_dir: Optional[str] = None
     video_type_threshold_seconds: Optional[int] = None
+    min_video_duration_seconds: Optional[int] = None
     auto_upload: Optional[bool] = None
     upload_meta: Optional[bool] = None
     force_upload: Optional[bool] = None
@@ -2433,6 +2642,7 @@ class PreviewRequest(BaseModel):
     limit: Optional[int] = None
     offset: int = 0
     offset_id: Optional[int] = None
+    min_video_duration_seconds: Optional[int] = None
 
 
 class RemoveItemsRequest(BaseModel):
@@ -2458,6 +2668,8 @@ class ConfigUpdateRequest(BaseModel):
     upload_account: Optional[str] = None
     upload_password: Optional[str] = None
     upload_api_token: Optional[str] = None
+    video_type_threshold_seconds: Optional[int] = None
+    min_video_duration_seconds: Optional[int] = None
 
 
 def _manifest_dirs() -> list[Path]:
@@ -2630,6 +2842,17 @@ def create_task(req: TaskRequest) -> dict:
             threshold = int(raw_threshold) if raw_threshold is not None else None
         except (TypeError, ValueError):
             threshold = None
+    min_duration = req.min_video_duration_seconds
+    if min_duration is None:
+        min_duration = _coerce_non_negative_int(
+            config.get("min_video_duration_seconds"),
+            MIN_VIDEO_DURATION_SECONDS,
+        )
+    else:
+        min_duration = _coerce_non_negative_int(
+            min_duration,
+            MIN_VIDEO_DURATION_SECONDS,
+        )
     task_id = _create_task(
         channel=req.channel,
         message_ids=req.message_ids,
@@ -2637,6 +2860,7 @@ def create_task(req: TaskRequest) -> dict:
         end_date=req.end_date,
         output_dir=req.output_dir,
         video_type_threshold_seconds=threshold,
+        min_video_duration_seconds=min_duration,
         auto_upload=auto_upload,
         upload_meta=upload_meta,
     )
@@ -2830,6 +3054,8 @@ def get_config() -> dict:
         "upload_account": config.get("upload_account"),
         "upload_password": config.get("upload_password"),
         "upload_api_token": config.get("upload_api_token"),
+        "video_type_threshold_seconds": config.get("video_type_threshold_seconds"),
+        "min_video_duration_seconds": config.get("min_video_duration_seconds"),
     }
 
 
@@ -2855,6 +3081,16 @@ def update_config(req: ConfigUpdateRequest) -> dict:
         config["upload_password"] = str(req.upload_password)
     if req.upload_api_token is not None:
         config["upload_api_token"] = str(req.upload_api_token).strip()
+    if req.video_type_threshold_seconds is not None:
+        config["video_type_threshold_seconds"] = _coerce_non_negative_int(
+            req.video_type_threshold_seconds,
+            DEFAULT_VIDEO_TYPE_THRESHOLD_SECONDS,
+        )
+    if req.min_video_duration_seconds is not None:
+        config["min_video_duration_seconds"] = _coerce_non_negative_int(
+            req.min_video_duration_seconds,
+            MIN_VIDEO_DURATION_SECONDS,
+        )
     _save_config(config)
     return {
         "telegram_api_id": config.get("telegram_api_id"),
@@ -2865,6 +3101,8 @@ def update_config(req: ConfigUpdateRequest) -> dict:
         "upload_account": config.get("upload_account"),
         "upload_password": config.get("upload_password"),
         "upload_api_token": config.get("upload_api_token"),
+        "video_type_threshold_seconds": config.get("video_type_threshold_seconds"),
+        "min_video_duration_seconds": config.get("min_video_duration_seconds"),
     }
 
 
@@ -3649,6 +3887,15 @@ async def logout(
 @app.post("/preview", dependencies=[Depends(_require_token)])
 async def preview_videos(req: PreviewRequest) -> dict:
     output_dir = _ensure_output_dir(req.output_dir)
+    config = _load_config()
+    min_video_duration_seconds = (
+        _coerce_non_negative_int(req.min_video_duration_seconds, MIN_VIDEO_DURATION_SECONDS)
+        if req.min_video_duration_seconds is not None
+        else _coerce_non_negative_int(
+            config.get("min_video_duration_seconds"),
+            MIN_VIDEO_DURATION_SECONDS,
+        )
+    )
 
     def _login_required() -> str:
         raise ValueError("æœåŠ¡å™¨æœªç™»å½• Telegramï¼Œè¯·å…ˆåœ¨ç½‘é¡µç™»å½•ã€‚")
@@ -3675,6 +3922,7 @@ async def preview_videos(req: PreviewRequest) -> dict:
                 "max_thumb_attempts": 3,
                 "preview_thumb_total_timeout": 1.8,
                 "allow_nearby_extra_images": False,
+                "min_video_duration_seconds": min_video_duration_seconds,
                 "get_phone_cb": _login_required,
                 "get_code_cb": _login_required,
                 "get_password_cb": _login_required,
@@ -3806,7 +4054,8 @@ async def preview_stream(
         if not authorized:
             await _close_pooled_telegram_client(key)
             raise HTTPException(status_code=400, detail="æœªç™»å½• Telegramã€‚")
-        message = await client.get_messages(channel, ids=message_id)
+        entity = await _resolve_telegram_entity(client, channel)
+        message = await client.get_messages(entity, ids=message_id)
         if not message or not (message.video or message.document):
             await _close_pooled_telegram_client(key)
             raise HTTPException(status_code=404, detail="è§†é¢‘ä¸å­˜åœ¨")

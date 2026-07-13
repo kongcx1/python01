@@ -357,7 +357,8 @@ export default {
           output_dir: this.form.outputDir,
           auto_upload: true,
           upload_meta: this.form.uploadMeta === '' ? undefined : this.form.uploadMeta === 'true',
-          video_type_threshold_seconds: Number(this.form.shortThreshold || 0)
+          video_type_threshold_seconds: Number(this.form.shortThreshold || 0),
+          min_video_duration_seconds: Number(this.form.minDuration || 0)
         }))
       })
       await Promise.all(requests)
@@ -388,6 +389,7 @@ export default {
           auto_upload: true,
           upload_meta: this.form.uploadMeta === '' ? undefined : this.form.uploadMeta === 'true',
           video_type_threshold_seconds: Number(this.form.shortThreshold || 0),
+          min_video_duration_seconds: Number(this.form.minDuration || 0),
           force_upload: true
         }))
       })
