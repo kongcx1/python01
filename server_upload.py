@@ -1,5 +1,6 @@
 import json
 import mimetypes
+import re
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -92,6 +93,13 @@ def _limit_tags(tags: list[str], max_count: int = 5) -> list[str]:
         if len(cleaned) >= max_count:
             break
     return cleaned
+
+
+def _movie_title_from_content(content: str, fallback: str = "") -> str:
+    text = str(content or "")
+    if not text:
+        text = str(fallback or "")
+    return text or "未命名"
 
 
 class UploadClient:
@@ -496,6 +504,7 @@ class UploadClient:
             url = f"{self.base_url}/{url.lstrip('/')}"
         headers = self._auth_headers()
         tags = _limit_tags(tags)
+        title = _movie_title_from_content(content, title)
         payload = {
             "title": title,
             "category": category,

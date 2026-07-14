@@ -49,7 +49,7 @@ PREVIEW_SOFT_TIMEOUT_SECONDS = 18
 PREVIEW_HARD_TIMEOUT_SECONDS = 24
 AUTH_STATUS_TIMEOUT_SECONDS = 8
 SPARK_MD5_HELPER = Path(__file__).resolve().parent / "tools" / "spark_md5_file.js"
-SERVER_CODE_VERSION = "2026-07-11-resolve-username-entity-v11"
+SERVER_CODE_VERSION = "2026-07-14-movie-title-same-content-v14"
 _server_version_cache: Optional[str] = None
 _db_init_lock = threading.Lock()
 _db_initialized = False
@@ -933,11 +933,10 @@ def _message_mime_type(message) -> str:
 
 
 def _movie_title_from_content(content: str, fallback: str = "") -> str:
-    text = re.sub(r"\s+", " ", str(content or "")).strip()
-    text = re.sub(r"^[#\s,，.。:：;；!！?？、|｜_\-—·]+", "", text).strip()
+    text = str(content or "")
     if not text:
-        text = str(fallback or "").strip()
-    return text[:10] or "未命名"
+        text = str(fallback or "")
+    return text or "未命名"
 
 
 def _telegram_id_candidates(channel: str) -> set[int]:
@@ -2143,8 +2142,15 @@ class TaskRunner:
                                     int(task["id"]),
                                     f"未获取到封面，继续创建影片记录：{message.id}",
                                 )
+                            movie_title = _movie_title_from_content(
+                                content, Path(file_name).stem
+                            )
+                            _write_task_log(
+                                int(task["id"]),
+                                f"影片标题同步：title_len={len(movie_title)} content_len={len(content)} same={movie_title == content}",
+                            )
                             uploader.create_movie_record(
-                                title=_movie_title_from_content(content, Path(file_name).stem),
+                                title=movie_title,
                                 category=config.get("movie_category_default") or "çºªå½•ç‰‡",
                                 content=content,
                                 tags=tags,
@@ -2492,8 +2498,15 @@ class TaskRunner:
                 if video_type == "long":
                     if uploader.movie_create_url:
                         try:
+                            movie_title = _movie_title_from_content(
+                                content, title or path.stem
+                            )
+                            _write_task_log(
+                                int(task["id"]),
+                                f"影片标题同步：title_len={len(movie_title)} content_len={len(content)} same={movie_title == content}",
+                            )
                             uploader.create_movie_record(
-                                title=_movie_title_from_content(content, title or path.stem),
+                                title=movie_title,
                                 category=category or "çºªå½•ç‰‡",
                                 content=content,
                                 tags=tags,
