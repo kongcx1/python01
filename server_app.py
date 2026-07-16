@@ -45,11 +45,12 @@ DEFAULT_VIDEO_META_URL = "https://userapi.sfthyf.cn/api/short/create"
 DEFAULT_MOVIE_CREATE_URL = "https://userapi.sfthyf.cn/api/movie/create"
 DEFAULT_VIDEO_TYPE_THRESHOLD_SECONDS = 600
 MIN_VIDEO_DURATION_SECONDS = int(os.getenv("MIN_VIDEO_DURATION_SECONDS", "10"))
+DEFAULT_MAX_RUNNING_TASKS = int(os.getenv("MAX_RUNNING_TASKS", "2"))
 PREVIEW_SOFT_TIMEOUT_SECONDS = 18
 PREVIEW_HARD_TIMEOUT_SECONDS = 24
 AUTH_STATUS_TIMEOUT_SECONDS = 8
 SPARK_MD5_HELPER = Path(__file__).resolve().parent / "tools" / "spark_md5_file.js"
-SERVER_CODE_VERSION = "2026-07-14-movie-title-same-content-v14"
+SERVER_CODE_VERSION = "2026-07-14-concurrent-account-tasks-v15"
 _server_version_cache: Optional[str] = None
 _db_init_lock = threading.Lock()
 _db_initialized = False
@@ -172,6 +173,8 @@ ws_manager = ConnectionManager()
 _login_codes: dict[str, str] = {}
 _login_lock = threading.Lock()
 _client_lock = threading.Lock()
+_task_session_locks: dict[tuple[str, str, str], threading.Lock] = {}
+_task_session_locks_lock = threading.Lock()
 _progress_throttle_lock = threading.Lock()
 _last_progress_write: dict[int, float] = {}
 _task_cache_lock = threading.Lock()
@@ -210,6 +213,29 @@ async def _with_client_lock_async(action):
 
 def _with_client_lock_sync(action):
     with _client_lock:
+        return action()
+
+
+def _task_session_lock_key(
+    api_id: str, api_hash: str, output_dir: Path
+) -> tuple[str, str, str]:
+    return (str(api_id), str(api_hash), str(output_dir.resolve()))
+
+
+def _get_task_session_lock(
+    api_id: str, api_hash: str, output_dir: Path
+) -> threading.Lock:
+    key = _task_session_lock_key(api_id, api_hash, output_dir)
+    with _task_session_locks_lock:
+        lock = _task_session_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _task_session_locks[key] = lock
+        return lock
+
+
+def _with_task_session_lock_sync(api_id: str, api_hash: str, output_dir: Path, action):
+    with _get_task_session_lock(api_id, api_hash, output_dir):
         return action()
 
 
@@ -312,6 +338,7 @@ def _load_config() -> dict:
     config.setdefault("movie_create_url", DEFAULT_MOVIE_CREATE_URL)
     config.setdefault("video_type_threshold_seconds", DEFAULT_VIDEO_TYPE_THRESHOLD_SECONDS)
     config.setdefault("min_video_duration_seconds", MIN_VIDEO_DURATION_SECONDS)
+    config.setdefault("max_running_tasks", DEFAULT_MAX_RUNNING_TASKS)
     return config
 
 
@@ -1223,6 +1250,7 @@ class TaskRunner:
     def __init__(self) -> None:
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._running: dict[int, RunningTask] = {}
+        self._running_lock = threading.Lock()
         self._stop_flag = threading.Event()
 
     def start(self) -> None:
@@ -1230,16 +1258,22 @@ class TaskRunner:
 
     def stop(self) -> None:
         self._stop_flag.set()
+        with self._running_lock:
+            running_tasks = list(self._running.values())
+        for running in running_tasks:
+            running.stop_event.set()
 
     def cancel(self, task_id: int) -> None:
-        running = self._running.get(task_id)
+        with self._running_lock:
+            running = self._running.get(task_id)
         if running:
             running.stop_event.set()
             _update_task(task_id, status="cancel_requested")
             _write_task_log(task_id, "收到取消请求。")
 
     def remove_ids(self, task_id: int, ids: list[int]) -> None:
-        running = self._running.get(task_id)
+        with self._running_lock:
+            running = self._running.get(task_id)
         if not running or not running.allowed_ids:
             if not running:
                 return
@@ -1250,7 +1284,8 @@ class TaskRunner:
                 running.removed_ids.add(msg_id)
 
     def set_pause(self, task_id: int, message_id: int, paused: bool) -> bool:
-        running = self._running.get(task_id)
+        with self._running_lock:
+            running = self._running.get(task_id)
         if not running:
             return False
         with running.paused_lock:
@@ -1260,8 +1295,24 @@ class TaskRunner:
                 running.paused_ids.discard(message_id)
         return True
 
+    def _max_running_tasks(self) -> int:
+        config = _load_config()
+        raw_value = config.get("max_running_tasks")
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            value = DEFAULT_MAX_RUNNING_TASKS
+        return max(1, min(8, value))
+
+    def _running_count(self) -> int:
+        with self._running_lock:
+            return len(self._running)
+
     def _loop(self) -> None:
         while not self._stop_flag.is_set():
+            if self._running_count() >= self._max_running_tasks():
+                time.sleep(0.5)
+                continue
             task = _fetch_next_pending()
             if not task:
                 time.sleep(1)
@@ -1269,27 +1320,43 @@ class TaskRunner:
             task_id = int(task["id"])
             stop_event = threading.Event()
             _cache_task(task)
-            self._running[task_id] = RunningTask(
-                task_id=task_id, stop_event=stop_event
-            )
+            running = RunningTask(task_id=task_id, stop_event=stop_event)
+            with self._running_lock:
+                if len(self._running) >= self._max_running_tasks():
+                    continue
+                self._running[task_id] = running
             _update_task(task_id, status="running")
             _write_task_version_log(task_id)
-            _write_task_log(task_id, "任务开始执行。")
-            try:
-                self._run_task(task, self._running[task_id])
-                if stop_event.is_set():
-                    _update_task(task_id, status="cancelled")
-                    _write_task_log(task_id, "任务已取消。")
-                else:
-                    _update_task(task_id, status="done")
-                    _write_task_log(task_id, "任务完成。")
-            except Exception as exc:
-                _update_task(task_id, status="failed", error=str(exc))
-                _write_task_log(task_id, f"任务失败: {exc}")
-            except BaseException as exc:
-                _update_task(task_id, status="failed", error=str(exc))
-                _write_task_log(task_id, f"任务异常中止: {exc}")
-            finally:
+            _write_task_log(
+                task_id,
+                f"任务开始执行。并发运行 {self._running_count()}/{self._max_running_tasks()}",
+            )
+            threading.Thread(
+                target=self._run_task_worker,
+                args=(task, running),
+                daemon=True,
+                name=f"task-runner-{task_id}",
+            ).start()
+
+    def _run_task_worker(self, task: dict, running: RunningTask) -> None:
+        task_id = int(task["id"])
+        stop_event = running.stop_event
+        try:
+            self._run_task(task, running)
+            if stop_event.is_set():
+                _update_task(task_id, status="cancelled")
+                _write_task_log(task_id, "任务已取消。")
+            else:
+                _update_task(task_id, status="done")
+                _write_task_log(task_id, "任务完成。")
+        except Exception as exc:
+            _update_task(task_id, status="failed", error=str(exc))
+            _write_task_log(task_id, f"任务失败: {exc}")
+        except BaseException as exc:
+            _update_task(task_id, status="failed", error=str(exc))
+            _write_task_log(task_id, f"任务异常中止: {exc}")
+        finally:
+            with self._running_lock:
                 self._running.pop(task_id, None)
 
     def _run_task(self, task: dict, running: RunningTask) -> None:
@@ -1320,19 +1387,25 @@ class TaskRunner:
             else root_dir / channel.replace("/", "_")
         )
         output_dir = output_dir.expanduser().resolve()
-        root_session = root_dir / "user_session.session"
-        root_session_parts = list(root_dir.glob("user_session.session*"))
-        if not root_session.exists():
-            raise RuntimeError("æœªå‘çŽ°æœåŠ¡å™¨ç™»å½•ä¼šè¯ï¼Œè¯·å…ˆåœ¨æœåŠ¡å™¨æ‰§è¡Œ python server_login.py")
         output_dir.mkdir(parents=True, exist_ok=True)
-        if not root_session_parts:
-            root_session_parts = [root_session]
-        for session_file in root_session_parts:
-            target = output_dir / session_file.name
-            try:
-                target.write_bytes(session_file.read_bytes())
-            except Exception as exc:
-                raise RuntimeError(f"æ— æ³•å¤åˆ¶ç™»å½•ä¼šè¯åˆ°ä»»åŠ¡ç›®å½•: {exc}") from exc
+        output_session = output_dir / "user_session.session"
+        if not output_session.exists():
+            root_session = root_dir / "user_session.session"
+            root_session_parts = list(root_dir.glob("user_session.session*"))
+            if not root_session.exists():
+                raise RuntimeError(
+                    "未发现当前任务目录的 Telegram 登录会话，请先在登录页使用该输出目录登录账号。"
+                )
+            if not root_session_parts:
+                root_session_parts = [root_session]
+            for session_file in root_session_parts:
+                target = output_dir / session_file.name
+                try:
+                    target.write_bytes(session_file.read_bytes())
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"无法复制登录会话到任务目录: {exc}"
+                    ) from exc
 
         download_total = len(message_ids) if message_ids else None
         progress_state: dict = {
@@ -1522,11 +1595,11 @@ class TaskRunner:
                     )
                 )
 
-            _with_client_lock_sync(_do_direct_upload)
+            _with_task_session_lock_sync(api_id, api_hash, output_dir, _do_direct_upload)
             return
 
         try:
-            _with_client_lock_sync(_do_download)
+            _with_task_session_lock_sync(api_id, api_hash, output_dir, _do_download)
         except Exception as exc:
             msg = str(exc)
             if "ç»ˆç«¯è¯»å–" in msg or "EOF" in msg or "è¾“å…¥" in msg:

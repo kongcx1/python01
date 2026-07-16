@@ -12,5 +12,6 @@
   "movie_create_url": "https://userapi.sfthyf.cn/api/movie/create",
   "movie_category_default": "纪录片",
   "video_type_threshold_seconds": 600,
-  "min_video_duration_seconds": 10
+  "min_video_duration_seconds": 10,
+  "max_running_tasks": 2
 }
