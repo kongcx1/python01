@@ -68,6 +68,14 @@ export function deleteTask(taskId) {
   return request({ url: `/tasks/${taskId}`, method: 'delete' })
 }
 
+export function uploadExternalVideoLibrary(data) {
+  return request({ url: '/external/video-library/upload', method: 'post', data, timeout: 0 })
+}
+
+export function getExternalVideoLibraryJob(jobId) {
+  return request({ url: `/external/video-library/jobs/${jobId}`, method: 'get' })
+}
+
 export function removeTaskItems(taskId, data) {
   return request({ url: `/tasks/${taskId}/remove`, method: 'post', data })
 }

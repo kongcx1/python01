@@ -8,6 +8,7 @@
       <router-link class="sidebar-link" to="/download/task-list">任务列表</router-link>
       <router-link class="sidebar-link" to="/download/tasks">下载列表</router-link>
       <router-link class="sidebar-link" to="/download/completed">完成列表</router-link>
+      <router-link class="sidebar-link" to="/download/external-library">链接下载</router-link>
     </aside>
     <section class="main-container">
       <header class="navbar">

@@ -7,10 +7,21 @@
           <div class="muted small-text">共 {{ taskTotal }} 条任务</div>
         </div>
         <div class="header-actions">
+          <el-select v-model="taskStatus" size="small" clearable placeholder="全部状态" class="status-filter" @change="handleTaskStatusChange">
+            <el-option label="待处理" value="pending" />
+            <el-option label="运行中" value="running" />
+            <el-option label="上传中" value="uploading" />
+            <el-option label="已完成" value="done" />
+            <el-option label="失败" value="failed" />
+            <el-option label="已取消" value="cancelled" />
+            <el-option label="取消中" value="cancel_requested" />
+          </el-select>
           <router-link to="/download/preview">
             <el-button size="small" icon="el-icon-search">任务管理</el-button>
           </router-link>
           <el-button size="small" icon="el-icon-refresh" :loading="tasksLoading" @click="loadTasks">刷新</el-button>
+          <el-button size="small" plain icon="el-icon-close" :loading="batchCancelling" :disabled="!cancelableSelectedTasks().length" @click="cancelSelectedTasks">批量取消</el-button>
+          <el-button size="small" type="warning" plain icon="el-icon-refresh-right" :loading="batchRetrying" :disabled="!retryableSelectedTasks().length" @click="retrySelectedTasks">批量重试</el-button>
           <el-button size="small" type="danger" plain icon="el-icon-delete" :disabled="!selectedTaskIds.length" @click="deleteSelectedTasks">删除所选</el-button>
         </div>
       </div>
@@ -102,6 +113,7 @@ export default {
       taskPage: 1,
       taskPageSize: 10,
       taskPageSizes: [10, 20, 50, 100],
+      taskStatus: '',
       selectedTaskIds: [],
       logVisible: false,
       logText: '',
@@ -109,7 +121,9 @@ export default {
       detailTitle: '任务详情',
       detailFiles: [],
       cancelingIds: [],
-      uploadingIds: []
+      uploadingIds: [],
+      batchCancelling: false,
+      batchRetrying: false
     }
   },
   created() {
@@ -129,6 +143,7 @@ export default {
         this.taskTotal = Number(state.taskTotal || this.tasks.length)
         this.taskPage = Math.max(1, Number(state.taskPage || 1))
         this.taskPageSize = Number(state.taskPageSize || 10)
+        this.taskStatus = state.taskStatus || ''
       } catch (error) {
         localStorage.removeItem(TaskStateKey)
       }
@@ -140,7 +155,8 @@ export default {
           tasks: this.tasks,
           taskTotal: this.taskTotal,
           taskPage: this.taskPage,
-          taskPageSize: this.taskPageSize
+          taskPageSize: this.taskPageSize,
+          taskStatus: this.taskStatus
         })
       )
     },
@@ -150,12 +166,20 @@ export default {
       try {
         const limit = this.taskPageSize
         let offset = (this.taskPage - 1) * limit
-        let data = await getTasks({ limit, offset, sort_by: 'updated_at', sort_order: 'desc' })
+        const params = {
+          limit,
+          offset,
+          sort_by: 'updated_at',
+          sort_order: 'desc'
+        }
+        if (this.taskStatus) params.status = this.taskStatus
+        let data = await getTasks(params)
         const total = Number(data.total || 0)
         if (!(data.items || []).length && total > 0 && this.taskPage > 1) {
           this.taskPage = Math.max(1, Math.ceil(total / this.taskPageSize))
           offset = (this.taskPage - 1) * limit
-          data = await getTasks({ limit, offset, sort_by: 'updated_at', sort_order: 'desc' })
+          params.offset = offset
+          data = await getTasks(params)
         }
         this.tasks = data.items || []
         this.taskTotal = Number(data.total || this.tasks.length)
@@ -176,6 +200,10 @@ export default {
     },
     handleTaskPageSizeChange(size) {
       this.taskPageSize = size
+      this.taskPage = 1
+      this.loadTasks()
+    },
+    handleTaskStatusChange() {
       this.taskPage = 1
       this.loadTasks()
     },
@@ -225,6 +253,12 @@ export default {
     canRetry(row) {
       return ['failed', 'cancelled'].indexOf(row.status) >= 0
     },
+    cancelableSelectedTasks() {
+      return this.tasks.filter(row => this.selectedTaskIds.indexOf(row.id) >= 0 && this.canCancel(row))
+    },
+    retryableSelectedTasks() {
+      return this.tasks.filter(row => this.selectedTaskIds.indexOf(row.id) >= 0 && this.canRetry(row))
+    },
     canUpload(row) {
       return ['done', 'failed', 'cancelled'].indexOf(row.status) >= 0
     },
@@ -256,6 +290,46 @@ export default {
       await retryTask(row.id)
       this.$message.success('已重新排队')
       this.loadTasks()
+    },
+    async cancelSelectedTasks() {
+      const rows = this.cancelableSelectedTasks()
+      if (!rows.length) return
+      await this.$confirm(`确认取消 ${rows.length} 个待处理或运行中的任务？`, '批量取消', { type: 'warning' })
+      this.batchCancelling = true
+      try {
+        const results = await Promise.allSettled(rows.map(row => cancelTask(row.id)))
+        const successCount = results.filter(result => result.status === 'fulfilled').length
+        const failedCount = results.length - successCount
+        if (failedCount) {
+          this.$message.warning(`已提交 ${successCount} 个任务取消，${failedCount} 个任务取消失败`)
+        } else {
+          this.$message.success(`已提交 ${successCount} 个任务取消`)
+        }
+        this.selectedTaskIds = []
+        await this.loadTasks()
+      } finally {
+        this.batchCancelling = false
+      }
+    },
+    async retrySelectedTasks() {
+      const rows = this.retryableSelectedTasks()
+      if (!rows.length) return
+      await this.$confirm(`确认重试 ${rows.length} 个失败或已取消任务？`, '批量重试', { type: 'warning' })
+      this.batchRetrying = true
+      try {
+        const results = await Promise.allSettled(rows.map(row => retryTask(row.id)))
+        const successCount = results.filter(result => result.status === 'fulfilled').length
+        const failedCount = results.length - successCount
+        if (failedCount) {
+          this.$message.warning(`已提交 ${successCount} 个任务，${failedCount} 个任务重试失败`)
+        } else {
+          this.$message.success(`已提交 ${successCount} 个任务重试`)
+        }
+        this.selectedTaskIds = []
+        await this.loadTasks()
+      } finally {
+        this.batchRetrying = false
+      }
     },
     async upload(row) {
       this.uploadingIds.push(row.id)
@@ -302,6 +376,10 @@ export default {
     display: inline-flex;
     align-items: center;
     gap: 8px;
+  }
+
+  .status-filter {
+    width: 118px;
   }
 
   .pagination-bar {

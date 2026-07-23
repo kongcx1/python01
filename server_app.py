@@ -3,16 +3,21 @@ import hashlib
 import os
 import queue
 import re
+import requests
 import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote, urlparse
 
 import anyio
 import asyncio
@@ -50,13 +55,14 @@ PREVIEW_SOFT_TIMEOUT_SECONDS = 18
 PREVIEW_HARD_TIMEOUT_SECONDS = 24
 AUTH_STATUS_TIMEOUT_SECONDS = 8
 SPARK_MD5_HELPER = Path(__file__).resolve().parent / "tools" / "spark_md5_file.js"
-SERVER_CODE_VERSION = "2026-07-14-concurrent-account-tasks-v15"
+SERVER_CODE_VERSION = "2026-07-22-external-progress-summary-v36"
 _server_version_cache: Optional[str] = None
 _db_init_lock = threading.Lock()
 _db_initialized = False
 _db_write_lock = threading.Lock()
 DB_BUSY_TIMEOUT_MS = int(os.getenv("SERVER_DB_BUSY_TIMEOUT_MS", "60000"))
 DB_WRITE_RETRIES = int(os.getenv("SERVER_DB_WRITE_RETRIES", "8"))
+LOGIN_CODE_TTL_SECONDS = int(os.getenv("LOGIN_CODE_TTL_SECONDS", "900"))
 
 
 def _server_version_text() -> str:
@@ -175,6 +181,12 @@ _login_lock = threading.Lock()
 _client_lock = threading.Lock()
 _task_session_locks: dict[tuple[str, str, str], threading.Lock] = {}
 _task_session_locks_lock = threading.Lock()
+_external_upload_jobs: dict[str, dict] = {}
+_external_upload_jobs_lock = threading.Lock()
+_external_upload_cancel_events: dict[int, threading.Event] = {}
+_task_progress_write_lock = threading.RLock()
+_json_md5_locks: dict[str, threading.Lock] = {}
+_json_md5_locks_lock = threading.Lock()
 _progress_throttle_lock = threading.Lock()
 _last_progress_write: dict[int, float] = {}
 _task_cache_lock = threading.Lock()
@@ -476,6 +488,15 @@ def _ensure_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_uploaded_videos_content_md5 ON uploaded_videos(content_md5)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS login_code_requests (
+                login_key TEXT PRIMARY KEY,
+                code_hash TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+            """
+        )
         rows = conn.execute(
             "SELECT channel, progress_json FROM tasks WHERE progress_json IS NOT NULL AND progress_json != ''"
         ).fetchall()
@@ -647,6 +668,13 @@ def _record_uploaded_video(
 
 
 def _merge_task_progress(task_id: int, patch: dict) -> None:
+    # JSON uploads can complete on several worker threads at once. Keep the
+    # read-modify-write operation atomic so one file update cannot erase another.
+    with _task_progress_write_lock:
+        _merge_task_progress_unlocked(task_id, patch)
+
+
+def _merge_task_progress_unlocked(task_id: int, patch: dict) -> None:
     patch = _repair_mojibake_value(patch)  # type: ignore[assignment]
     now = time.monotonic()
     fast_keys = {"download", "upload", "upload_video"}
@@ -837,6 +865,92 @@ def _create_task(
             "error": None,
         }
     )
+    return task_id
+
+
+def _external_upload_progress(
+    total: int,
+    payload: Optional[object] = None,
+    category: Optional[str] = None,
+    limit: Optional[int] = None,
+    md5_by_url: Optional[dict] = None,
+) -> dict:
+    progress = {
+        "stage": "upload",
+        "status": "JSON视频上传准备中",
+        "download_count": {"done": 0, "total": total},
+        "upload_count": {"done": 0, "total": total},
+        "files": {},
+    }
+    if payload is not None:
+        progress["external_upload"] = {
+            "payload": payload,
+            "category": category,
+            "limit": limit,
+            "md5_by_url": md5_by_url or {},
+        }
+    return progress
+
+
+def _create_external_upload_task(
+    total: int,
+    payload: Optional[object] = None,
+    category: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> int:
+    config = _load_config()
+    now = _utc_now()
+    output_dir = str(config.get("download_root") or "downloads")
+    progress = _external_upload_progress(total, payload, category, limit)
+
+    def _insert(conn):
+        cur = conn.execute(
+            """
+            INSERT INTO tasks (
+                status, channel, message_ids, start_date, end_date, output_dir,
+                video_type_threshold_seconds, min_video_duration_seconds,
+                auto_upload, upload_meta, created_at, updated_at, progress_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "running",
+                "JSON视频上传",
+                json.dumps([], ensure_ascii=False),
+                None,
+                None,
+                output_dir,
+                config.get("video_type_threshold_seconds"),
+                config.get("min_video_duration_seconds"),
+                1,
+                1,
+                now,
+                now,
+                json.dumps(progress, ensure_ascii=False),
+            ),
+        )
+        return int(cur.lastrowid)
+
+    task_id = int(_db_write(_insert))
+    _cache_task(
+        {
+            "id": task_id,
+            "status": "running",
+            "channel": "JSON视频上传",
+            "message_ids": json.dumps([], ensure_ascii=False),
+            "start_date": None,
+            "end_date": None,
+            "output_dir": output_dir,
+            "video_type_threshold_seconds": config.get("video_type_threshold_seconds"),
+            "min_video_duration_seconds": config.get("min_video_duration_seconds"),
+            "auto_upload": 1,
+            "upload_meta": 1,
+            "created_at": now,
+            "updated_at": now,
+            "progress_json": json.dumps(progress, ensure_ascii=False),
+            "error": None,
+        }
+    )
+    _broadcast_event({"type": "task_created", "task_id": task_id, "status": "running"})
     return task_id
 
 
@@ -1659,7 +1773,7 @@ class TaskRunner:
 
         auto_upload = bool(task.get("auto_upload"))
         if auto_upload:
-            self._auto_upload(task, output_dir, message_ids)
+            self._auto_upload(task, output_dir, message_ids, running.stop_event)
 
     async def _run_direct_upload_async(
         self,
@@ -1920,6 +2034,72 @@ class TaskRunner:
                     )
                     await asyncio.sleep(seconds + 1)
 
+                def _is_file_reference_expired(exc: BaseException) -> bool:
+                    text = " ".join(
+                        str(part or "")
+                        for part in (
+                            getattr(exc, "message", None),
+                            getattr(exc, "name", None),
+                            str(exc),
+                        )
+                    ).lower()
+                    return (
+                        "file reference" in text
+                        and (
+                            "expired" in text
+                            or "no longer valid" in text
+                            or "self-destructing" in text
+                        )
+                    )
+
+                file_reference_refresh_count = 0
+                max_file_reference_refreshes = max(
+                    1, int(os.getenv("TELEGRAM_FILE_REFERENCE_REFRESHES", "5"))
+                )
+
+                async def _refresh_message_media(reason: str, sent_from_telegram: int = 0) -> None:
+                    nonlocal message, total_bytes, content_type, file_reference_refresh_count
+                    file_reference_refresh_count += 1
+                    if file_reference_refresh_count > max_file_reference_refreshes:
+                        raise RuntimeError(
+                            f"Telegram 文件引用刷新超过上限：{message.id}，请稍后重试。"
+                        )
+                    refresh_text = (
+                        f"Telegram 文件引用过期，刷新消息后继续：{message.id} "
+                        f"({file_reference_refresh_count}/{max_file_reference_refreshes}) reason={reason}"
+                    )
+                    _write_task_log(int(task["id"]), refresh_text)
+                    _merge_task_progress(
+                        int(task["id"]),
+                        {
+                            "stage": "upload",
+                            "status": refresh_text,
+                            "files": {
+                                upload_key: {
+                                    "message_id": int(message.id),
+                                    "file_name": file_name,
+                                    "status": "refreshing",
+                                    "upload_status": "refreshing",
+                                    "bytes_downloaded": sent_from_telegram,
+                                    "bytes_total": total_bytes,
+                                    "upload_sent": sent_from_telegram,
+                                    "upload_total": total_bytes,
+                                }
+                            },
+                        },
+                    )
+                    entity = await _resolve_telegram_entity(client, channel)
+                    refreshed = await client.get_messages(entity, ids=int(message.id))
+                    if isinstance(refreshed, (list, tuple)):
+                        refreshed = next((item for item in refreshed if item is not None), None)
+                    if not refreshed or not getattr(refreshed, "media", None):
+                        raise RuntimeError(f"Telegram 文件引用刷新失败：{message.id}")
+                    message = refreshed
+                    refreshed_size = _message_file_size(message)
+                    if refreshed_size > 0:
+                        total_bytes = refreshed_size
+                    content_type = _message_mime_type(message) or content_type
+
                 async def _next_telegram_chunk(offset: int = 0, sent_from_telegram: int = 0):
                     while True:
                         try:
@@ -1933,6 +2113,9 @@ class TaskRunner:
                         except StopAsyncIteration:
                             return None, b""
                         except (FloodWaitError, RPCError) as exc:
+                            if _is_file_reference_expired(exc):
+                                await _refresh_message_media("start-chunk", sent_from_telegram)
+                                continue
                             await _sleep_for_flood_wait(exc, sent_from_telegram)
 
                 async def _hash_telegram_media() -> tuple[Optional[str], int]:
@@ -1956,7 +2139,10 @@ class TaskRunner:
                                 digest.update(chunk_bytes)
                             break
                         except (FloodWaitError, RPCError) as exc:
-                            await _sleep_for_flood_wait(exc, hashed)
+                            if _is_file_reference_expired(exc):
+                                await _refresh_message_media("md5", hashed)
+                            else:
+                                await _sleep_for_flood_wait(exc, hashed)
                             aiter, first_chunk = await _next_telegram_chunk(hashed, hashed)
                             if first_chunk:
                                 hashed += len(first_chunk)
@@ -2078,7 +2264,12 @@ class TaskRunner:
                                     await _put_queue_item(chunk_bytes)
                                 break
                             except (FloodWaitError, RPCError) as exc:
-                                await _sleep_for_flood_wait(exc, sent_from_telegram)
+                                if _is_file_reference_expired(exc):
+                                    await _refresh_message_media(
+                                        f"upload-attempt-{attempt}", sent_from_telegram
+                                    )
+                                else:
+                                    await _sleep_for_flood_wait(exc, sent_from_telegram)
                                 aiter, first_chunk = await _next_telegram_chunk(
                                     sent_from_telegram, sent_from_telegram
                                 )
@@ -2255,7 +2446,13 @@ class TaskRunner:
         finally:
             await _shield_close_client(client)
 
-    def _auto_upload(self, task: dict, output_dir: Path, message_ids: list[int]) -> None:
+    def _auto_upload(
+        self,
+        task: dict,
+        output_dir: Path,
+        message_ids: list[int],
+        stop_event: Optional[threading.Event] = None,
+    ) -> None:
         config = _load_config()
         base_url = config.get("upload_base_url")
         account = config.get("upload_account") or ""
@@ -2353,6 +2550,9 @@ class TaskRunner:
             threshold_seconds = DEFAULT_VIDEO_TYPE_THRESHOLD_SECONDS
         done_upload = 0
         for index, path in enumerate(targets, start=1):
+            if stop_event is not None and stop_event.is_set():
+                _write_task_log(int(task["id"]), "收到取消请求，停止后续本地文件上传。")
+                return
             if not path.exists():
                 _write_task_log(int(task["id"]), f"文件不存在，跳过上传: {path}")
                 continue
@@ -2745,6 +2945,12 @@ class DeleteCompletedRequest(BaseModel):
     message_id: int
 
 
+class ExternalVideoLibraryUploadRequest(BaseModel):
+    payload: object
+    category: Optional[str] = None
+    limit: Optional[int] = None
+
+
 class ConfigUpdateRequest(BaseModel):
     telegram_api_id: Optional[str] = None
     telegram_api_hash: Optional[str] = None
@@ -2789,6 +2995,468 @@ def _manifest_dirs() -> list[Path]:
             except Exception:
                 pass
     return sorted(manifest_dirs, key=lambda item: str(item).lower())
+
+
+def _external_library_items(payload: object) -> list[dict]:
+    if isinstance(payload, dict):
+        tasks = payload.get("tasks")
+        if isinstance(tasks, list):
+            return [item for item in tasks if isinstance(item, dict)]
+        return [payload]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    raise HTTPException(status_code=400, detail="JSON 必须是对象或数组。")
+
+
+def _external_upload_request_from_body(
+    body: object,
+    category: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> ExternalVideoLibraryUploadRequest:
+    body_category: Optional[str] = None
+    body_limit: Optional[int] = None
+    payload = body
+    if isinstance(body, dict) and "payload" in body:
+        payload = body.get("payload")
+        if body.get("category") is not None:
+            body_category = str(body.get("category") or "").strip() or None
+        if body.get("limit") is not None:
+            try:
+                body_limit = int(body.get("limit"))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="limit 必须是数字。")
+    if limit is not None:
+        body_limit = int(limit)
+    if category is not None:
+        body_category = str(category or "").strip() or None
+    return ExternalVideoLibraryUploadRequest(
+        payload=payload,
+        category=body_category,
+        limit=body_limit,
+    )
+
+
+def _external_tag_texts(item: dict) -> list[str]:
+    tags: list[str] = []
+    raw_tags = item.get("tags") or []
+    if not isinstance(raw_tags, list):
+        return tags
+    for tag in raw_tags:
+        text = ""
+        if isinstance(tag, dict):
+            text = str(tag.get("text") or "").strip()
+        elif isinstance(tag, str):
+            text = tag.strip()
+        if text:
+            tags.append(_repair_mojibake_text(text))
+    return tags
+
+
+def _external_video_url(item: dict) -> str:
+    captured = item.get("capturedDownload")
+    if isinstance(captured, dict) and captured.get("url"):
+        return str(captured.get("url") or "").strip()
+    downloads = item.get("downloads") or []
+    if isinstance(downloads, list):
+        for entry in downloads:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("kind") or "").lower() == "download" and entry.get("url"):
+                return str(entry.get("url") or "").strip()
+    return ""
+
+
+def _external_cover_url(item: dict) -> str:
+    cover = item.get("cover")
+    if isinstance(cover, dict) and cover.get("url"):
+        return str(cover.get("url") or "").strip()
+    return ""
+
+
+def _file_name_from_url(url: str, fallback: str, default_suffix: str) -> str:
+    parsed = urlparse(url)
+    name = unquote(Path(parsed.path).name or "").strip()
+    if not name:
+        name = fallback
+    name = re.sub(r"[^\w.\- ]+", "_", name).strip(" ._") or fallback
+    if not Path(name).suffix:
+        name = f"{name}{default_suffix}"
+    return name[:160]
+
+
+def _upload_remote_media_once(
+    uploader: UploadClient,
+    url: str,
+    file_name: str,
+    kind: str,
+    log_cb=None,
+) -> dict:
+    if not url.startswith(("http://", "https://")):
+        raise RuntimeError("远程地址必须是 http/https。")
+    headers = {"User-Agent": "Mozilla/5.0"}
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, 4):
+        try:
+            resp_ctx = requests.get(url, stream=True, timeout=(15, 900), headers=headers)
+            break
+        except requests.RequestException as exc:
+            last_exc = exc
+            if log_cb:
+                log_cb(f"远程媒体下载连接失败，重试 {attempt}/3：{file_name} {exc}")
+            if attempt < 3:
+                time.sleep(2 * attempt)
+    else:
+        error_text = str(last_exc or "")
+        if "NameResolutionError" in error_text or "getaddrinfo failed" in error_text:
+            raise RuntimeError(
+                f"远程媒体 DNS 解析失败：{file_name}，请检查服务器 DNS/网络是否能访问 {urlparse(url).hostname}"
+            )
+        raise RuntimeError(f"远程媒体下载连接失败：{file_name} {last_exc}")
+
+    with resp_ctx as resp:
+        resp.raise_for_status()
+        content_type = str(resp.headers.get("Content-Type") or "").split(";", 1)[0].strip()
+        if not content_type or content_type == "application/octet-stream":
+            content_type = "video/mp4" if kind == "video" else "image/jpeg"
+        try:
+            total = int(str(resp.headers.get("Content-Length") or "").strip())
+        except ValueError:
+            total = 0
+        if total > 0:
+            digest = hashlib.md5()
+            hashed_bytes = 0
+
+            class HashingReader:
+                def read(self, size: int = -1) -> bytes:
+                    nonlocal hashed_bytes
+                    chunk = resp.raw.read(size)
+                    if chunk:
+                        hashed_bytes += len(chunk)
+                        digest.update(chunk)
+                    return chunk
+
+            resp.raw.decode_content = True
+            if kind == "image":
+                upload_id = uploader.upload_image_reader(file_name, HashingReader(), total, content_type)
+            else:
+                upload_id = uploader.upload_video_reader(file_name, HashingReader(), total, content_type)
+            return {
+                "upload_id": upload_id,
+                "content_md5": digest.hexdigest(),
+                "hashed_bytes": hashed_bytes,
+                "file_size": total,
+                "content_type": content_type,
+            }
+
+        temp_dir = STATE_DIR / "external_uploads"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(file_name).suffix or (".jpg" if kind == "image" else ".mp4")
+        temp_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=temp_dir) as handle:
+                temp_path = Path(handle.name)
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        handle.write(chunk)
+            content_md5 = _file_content_md5(temp_path) if temp_path else None
+            file_size = temp_path.stat().st_size if temp_path and temp_path.exists() else 0
+            if kind == "image":
+                upload_id = uploader.upload_image_file(temp_path)
+            else:
+                upload_id = uploader.upload_video_file(temp_path)
+            return {
+                "upload_id": upload_id,
+                "content_md5": content_md5,
+                "hashed_bytes": file_size,
+                "file_size": file_size,
+                "content_type": content_type,
+            }
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
+
+
+def _is_retryable_remote_upload_error(exc: Exception) -> bool:
+    if isinstance(exc, requests.HTTPError):
+        response = exc.response
+        return response is None or response.status_code >= 500
+    if isinstance(exc, (requests.RequestException, ConnectionError, TimeoutError, OSError, EOFError)):
+        return True
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "timed out",
+            "timeout",
+            "ssl eof",
+            "eof occurred in violation of protocol",
+            "tlsv1",
+            "connection aborted",
+            "connection reset",
+            "connection broken",
+            "remote disconnected",
+            "incomplete read",
+        )
+    )
+
+
+def _upload_remote_media(
+    uploader: UploadClient,
+    url: str,
+    file_name: str,
+    kind: str,
+    log_cb=None,
+) -> dict:
+    max_attempts = max(1, int(os.getenv("REMOTE_MEDIA_UPLOAD_ATTEMPTS", "6")))
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return _upload_remote_media_once(uploader, url, file_name, kind, log_cb=log_cb)
+        except Exception as exc:
+            if attempt >= max_attempts or not _is_retryable_remote_upload_error(exc):
+                raise
+            if log_cb:
+                log_cb(
+                    f"远程媒体上传中断，重新获取文件并重传 {attempt}/{max_attempts}：{file_name} {exc}"
+                )
+            time.sleep(min(10, attempt * 2))
+    raise RuntimeError(f"远程媒体上传失败：{file_name}")
+
+
+def _download_remote_media_to_temp(
+    url: str,
+    file_name: str,
+    kind: str,
+    log_cb=None,
+    known_md5: str = "",
+    known_file_size: int = 0,
+    destination: Optional[Path] = None,
+) -> dict:
+    if not url.startswith(("http://", "https://")):
+        raise RuntimeError("远程地址必须是 http/https。")
+    temp_dir = STATE_DIR / "external_uploads"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(file_name).suffix or (".jpg" if kind == "image" else ".mp4")
+    max_attempts = max(1, int(os.getenv("REMOTE_MEDIA_DOWNLOAD_ATTEMPTS", "5")))
+    range_chunk_bytes = max(
+        64 * 1024,
+        int(os.getenv("REMOTE_MEDIA_RANGE_CHUNK_BYTES", str(512 * 1024))),
+    )
+    headers = {"User-Agent": "Mozilla/5.0"}
+    temporary_file = destination is None
+    if destination is None:
+        temp_fd, temp_name = tempfile.mkstemp(suffix=suffix, dir=temp_dir)
+        os.close(temp_fd)
+        temp_path = Path(temp_name)
+    else:
+        temp_path = destination.expanduser()
+        temp_path.parent.mkdir(parents=True, exist_ok=True)
+    expected_size: Optional[int] = known_file_size if known_md5 and known_file_size > 0 else None
+    content_type = "video/mp4" if kind == "video" else "image/jpeg"
+    retry_count = 0
+    use_chunked_ranges = False
+
+    try:
+        while True:
+            downloaded_size = temp_path.stat().st_size if temp_path.exists() else 0
+            if expected_size is not None and downloaded_size >= expected_size:
+                return {
+                    "path": temp_path,
+                    "content_md5": known_md5 if known_file_size == downloaded_size else (_file_content_md5(temp_path) or ""),
+                    "file_size": downloaded_size,
+                    "content_type": content_type,
+                    "md5_reused": bool(known_md5 and known_file_size == downloaded_size),
+                    "temporary_file": temporary_file,
+                }
+            request_headers = dict(headers)
+            if downloaded_size > 0 or use_chunked_ranges:
+                range_end = ""
+                if expected_size is not None:
+                    range_end = str(
+                        min(expected_size - 1, downloaded_size + range_chunk_bytes - 1)
+                    )
+                request_headers["Range"] = f"bytes={downloaded_size}-{range_end}"
+            try:
+                with requests.get(
+                    url,
+                    stream=True,
+                    timeout=(15, 900),
+                    headers=request_headers,
+                ) as response:
+                    if downloaded_size > 0 and response.status_code == 200:
+                        # Source does not support ranges. Restart instead of corrupting the file.
+                        with temp_path.open("wb"):
+                            pass
+                        downloaded_size = 0
+                        expected_size = None
+                        use_chunked_ranges = False
+                    response.raise_for_status()
+                    response_content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip()
+                    if response_content_type and response_content_type != "application/octet-stream":
+                        content_type = response_content_type
+                    content_range = str(response.headers.get("Content-Range") or "")
+                    total_match = re.search(r"/(\d+)$", content_range)
+                    if total_match:
+                        expected_size = int(total_match.group(1))
+                    try:
+                        response_size = int(str(response.headers.get("Content-Length") or "").strip())
+                    except ValueError:
+                        response_size = 0
+                    if response_size > 0 and expected_size is None:
+                        expected_size = downloaded_size + response_size if response.status_code == 206 else response_size
+                    with temp_path.open("ab" if downloaded_size > 0 else "wb") as handle:
+                        # Small chunks preserve nearly all data when a CDN closes mid-response.
+                        for chunk in response.iter_content(chunk_size=64 * 1024):
+                            if chunk:
+                                handle.write(chunk)
+                file_size = temp_path.stat().st_size
+                if file_size <= 0:
+                    raise RuntimeError("远程媒体下载为空。")
+                if expected_size is None or file_size >= expected_size:
+                    return {
+                        "path": temp_path,
+                        "content_md5": known_md5 if known_file_size == file_size else (_file_content_md5(temp_path) or ""),
+                        "file_size": file_size,
+                        "content_type": content_type,
+                        "md5_reused": bool(known_md5 and known_file_size == file_size),
+                        "temporary_file": temporary_file,
+                    }
+                # A complete range block was received; continue with the next block.
+                retry_count = 0
+                use_chunked_ranges = True
+            except Exception as exc:
+                if not _is_retryable_remote_upload_error(exc):
+                    raise
+                retry_count += 1
+                if retry_count >= max_attempts:
+                    raise
+                resume_size = temp_path.stat().st_size if temp_path.exists() else 0
+                use_chunked_ranges = True
+                if log_cb:
+                    log_cb(
+                        f"远程媒体下载中断，断点续传 {retry_count}/{max_attempts}：{file_name} 已下载 {resume_size} bytes，{exc}"
+                    )
+                time.sleep(min(10, retry_count * 2))
+    except Exception:
+        if temporary_file:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def _upload_local_media_with_retry(
+    uploader: UploadClient,
+    path: Path,
+    kind: str,
+    log_cb=None,
+) -> int:
+    max_attempts = max(1, int(os.getenv("REMOTE_MEDIA_UPLOAD_ATTEMPTS", "6")))
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return (
+                uploader.upload_image_file(path)
+                if kind == "image"
+                else uploader.upload_video_file(path)
+            )
+        except Exception as exc:
+            if attempt >= max_attempts or not _is_retryable_remote_upload_error(exc):
+                raise
+            if log_cb:
+                log_cb(
+                    f"媒体直传中断，复用已下载文件重传 {attempt}/{max_attempts}：{path.name} {exc}"
+                )
+            time.sleep(min(10, attempt * 2))
+    raise RuntimeError(f"媒体直传失败：{path.name}")
+
+
+class _SkipExternalJsonVideo(RuntimeError):
+    """Signals that a JSON video already exists and needs no further upload work."""
+
+
+def _json_md5_lock(content_md5: str) -> threading.Lock:
+    with _json_md5_locks_lock:
+        lock = _json_md5_locks.get(content_md5)
+        if lock is None:
+            lock = threading.Lock()
+            _json_md5_locks[content_md5] = lock
+        return lock
+
+
+def _upload_json_video_with_deduplication(
+    uploader: UploadClient,
+    url: str,
+    file_name: str,
+    log_cb=None,
+    known_md5: str = "",
+    known_file_size: int = 0,
+    on_md5_ready=None,
+    local_path: Optional[Path] = None,
+) -> dict:
+    downloaded = _download_remote_media_to_temp(
+        url,
+        file_name,
+        "video",
+        log_cb=log_cb,
+        known_md5=known_md5,
+        known_file_size=known_file_size,
+        destination=local_path,
+    )
+    temp_path = downloaded["path"]
+    try:
+        content_md5 = str(downloaded.get("content_md5") or "").lower()
+        file_size = int(downloaded.get("file_size") or 0)
+        if log_cb and not downloaded.get("temporary_file"):
+            log_cb(
+                f"JSON视频本地下载完成：{temp_path.name} path={temp_path} bytes={file_size}"
+            )
+        if callable(on_md5_ready) and content_md5:
+            on_md5_ready(content_md5, file_size, bool(downloaded.get("md5_reused")))
+        if not content_md5:
+            raise RuntimeError(f"无法计算 JSON 视频 MD5：{file_name}")
+        # Only same-content files serialize here. Different videos continue uploading
+        # concurrently, while duplicate inputs cannot upload twice before DB recording.
+        with _json_md5_lock(content_md5):
+            duplicate = _fetch_uploaded_video_by_md5(content_md5)
+            existing_upload_id = int((duplicate or {}).get("upload_id") or 0)
+            if existing_upload_id > 0:
+                return {
+                    "upload_id": existing_upload_id,
+                    "content_md5": content_md5,
+                    "hashed_bytes": file_size,
+                    "file_size": file_size,
+                    "content_type": downloaded.get("content_type"),
+                    "duplicate": duplicate,
+                    "skipped": True,
+                }
+            upload_id = _upload_local_media_with_retry(
+                uploader, temp_path, "video", log_cb=log_cb
+            )
+            _record_uploaded_video(
+                "JSON视频上传",
+                int(content_md5[:15], 16),
+                file_name,
+                file_size,
+                upload_id,
+                content_md5,
+            )
+            return {
+                "upload_id": upload_id,
+                "content_md5": content_md5,
+                "hashed_bytes": file_size,
+                "file_size": file_size,
+                "content_type": downloaded.get("content_type"),
+                "skipped": False,
+            }
+    finally:
+        if downloaded.get("temporary_file"):
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 def _safe_child_path(base_dir: Path, value: str) -> Optional[Path]:
@@ -2986,6 +3654,7 @@ def get_task_files(task_id: int) -> dict:
         }
     else:
         merged = {}
+    is_external_upload_task = str(task.get("channel") or "") == "JSON视频上传"
 
     try:
         message_ids = json.loads(task.get("message_ids") or "[]")
@@ -3009,6 +3678,13 @@ def get_task_files(task_id: int) -> dict:
     else:
         config = _load_config()
         output_dir = Path(config.get("download_root", "downloads")).expanduser()
+    if is_external_upload_task:
+        def _sort_external_key(item: dict) -> int:
+            value = item.get("message_id")
+            return int(value) if isinstance(value, int) or str(value).isdigit() else 0
+
+        items = sorted(merged.values(), key=_sort_external_key)
+        return _repair_mojibake_value({"items": items})  # type: ignore[return-value]
     try:
         manifest_rows = read_manifest(output_dir)
     except Exception:
@@ -3192,6 +3868,757 @@ def update_config(req: ConfigUpdateRequest) -> dict:
     }
 
 
+def _external_upload_request_from_task(task: dict) -> Optional[ExternalVideoLibraryUploadRequest]:
+    raw_progress = task.get("progress_json") or "{}"
+    try:
+        progress = json.loads(raw_progress) if isinstance(raw_progress, str) else raw_progress
+    except json.JSONDecodeError:
+        progress = {}
+    saved = progress.get("external_upload") if isinstance(progress, dict) else None
+    if isinstance(saved, dict) and saved.get("payload") is not None:
+        req = ExternalVideoLibraryUploadRequest(
+            payload=saved.get("payload"),
+            category=saved.get("category"),
+            limit=saved.get("limit"),
+        )
+        files = progress.get("files") if isinstance(progress, dict) else {}
+        failed_indexes = {
+            int(key)
+            for key, value in (files or {}).items()
+            if str(key).isdigit()
+            and isinstance(value, dict)
+            and str(value.get("upload_status") or value.get("status") or "").lower() == "failed"
+        }
+        if failed_indexes:
+            source_items = _external_library_items(req.payload)
+            failed_items = [
+                item for index, item in enumerate(source_items, start=1)
+                if index in failed_indexes
+            ]
+            if failed_items:
+                return ExternalVideoLibraryUploadRequest(
+                    payload={"tasks": failed_items},
+                    category=req.category,
+                )
+        return req
+
+    # Compatibility for tasks created before the JSON source was persisted.
+    with _external_upload_jobs_lock:
+        jobs = list(_external_upload_jobs.values())
+    for job in reversed(jobs):
+        if int(job.get("task_id") or 0) != int(task.get("id") or 0):
+            continue
+        rows = job.get("items") or []
+        recovered_items: list[dict] = []
+        for row in rows:
+            if (
+                not isinstance(row, dict)
+                or str(row.get("status") or "").lower() == "done"
+                or not row.get("video_url")
+            ):
+                continue
+            item = {
+                "title": row.get("title") or "",
+                "tags": [{"text": tag} for tag in row.get("tags") or [] if str(tag).strip()],
+                "capturedDownload": {"url": row.get("video_url")},
+            }
+            if row.get("cover_url"):
+                item["cover"] = {"url": row.get("cover_url")}
+            recovered_items.append(item)
+        if recovered_items:
+            return ExternalVideoLibraryUploadRequest(payload={"tasks": recovered_items})
+    return None
+
+
+def _external_md5_by_url(task: Optional[dict]) -> dict:
+    if not task:
+        return {}
+    raw_progress = task.get("progress_json") or "{}"
+    try:
+        progress = json.loads(raw_progress) if isinstance(raw_progress, str) else raw_progress
+    except json.JSONDecodeError:
+        return {}
+    external_upload = progress.get("external_upload") if isinstance(progress, dict) else None
+    values = external_upload.get("md5_by_url") if isinstance(external_upload, dict) else None
+    return dict(values) if isinstance(values, dict) else {}
+
+
+def _external_known_md5(task_id: int, url: str) -> tuple[str, int]:
+    value = _external_md5_by_url(_fetch_task(task_id)).get(url)
+    if not isinstance(value, dict):
+        return "", 0
+    content_md5 = str(value.get("content_md5") or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{32}", content_md5):
+        return "", 0
+    try:
+        file_size = int(value.get("file_size") or 0)
+    except (TypeError, ValueError):
+        file_size = 0
+    return content_md5, max(0, file_size)
+
+
+def _external_json_video_path(task_id: int, index: int, file_name: str) -> Path:
+    task = _fetch_task(task_id) or {}
+    config = _load_config()
+    output_dir = Path(task.get("output_dir") or config.get("download_root") or "downloads")
+    safe_name = re.sub(r"[^\w.\- ]+", "_", str(file_name or "")).strip(" ._")
+    if not safe_name:
+        safe_name = f"external_{index}.mp4"
+    if not Path(safe_name).suffix:
+        safe_name = f"{safe_name}.mp4"
+    return output_dir.expanduser() / "json_video_uploads" / f"task_{task_id}" / f"{index:04d}_{safe_name}"
+
+
+def _record_external_md5(
+    task_id: int,
+    url: str,
+    file_name: str,
+    content_md5: str,
+    file_size: int,
+    local_path: Optional[Path] = None,
+) -> None:
+    with _task_progress_write_lock:
+        _record_external_md5_unlocked(
+            task_id,
+            url,
+            file_name,
+            content_md5,
+            file_size,
+            local_path,
+        )
+
+
+def _record_external_md5_unlocked(
+    task_id: int,
+    url: str,
+    file_name: str,
+    content_md5: str,
+    file_size: int,
+    local_path: Optional[Path] = None,
+) -> None:
+    task = _fetch_task(task_id)
+    if not task:
+        return
+    raw_progress = task.get("progress_json") or "{}"
+    try:
+        progress = json.loads(raw_progress) if isinstance(raw_progress, str) else raw_progress
+    except json.JSONDecodeError:
+        progress = {}
+    external_upload = progress.setdefault("external_upload", {})
+    if not isinstance(external_upload, dict):
+        external_upload = {}
+        progress["external_upload"] = external_upload
+    md5_by_url = external_upload.setdefault("md5_by_url", {})
+    if not isinstance(md5_by_url, dict):
+        md5_by_url = {}
+        external_upload["md5_by_url"] = md5_by_url
+    md5_by_url[url] = {
+        "file_name": file_name,
+        "content_md5": content_md5,
+        "file_size": int(file_size),
+        "local_path": str(local_path) if local_path else "",
+        "recorded_at": _utc_now(),
+    }
+    _update_task(task_id, progress_json=json.dumps(progress, ensure_ascii=False))
+
+
+def _start_external_video_library_upload(
+    req: ExternalVideoLibraryUploadRequest,
+    task_id: Optional[int] = None,
+) -> dict:
+    items = _external_library_items(req.payload)
+    if req.limit is not None:
+        items = items[: max(0, int(req.limit))]
+    is_retry = task_id is not None
+    if task_id is None:
+        task_id = _create_external_upload_task(
+            len(items), req.payload, req.category, req.limit
+        )
+    else:
+        saved_md5_by_url = _external_md5_by_url(_fetch_task(task_id))
+        progress = _external_upload_progress(
+            len(items), req.payload, req.category, req.limit, saved_md5_by_url
+        )
+        _update_task(
+            task_id,
+            status="running",
+            error=None,
+            progress_json=json.dumps(progress, ensure_ascii=False),
+        )
+    _write_task_version_log(task_id)
+    action = "任务重试" if is_retry else "任务开始"
+    _write_task_log(task_id, f"JSON视频上传{action}：共 {len(items)} 条。")
+
+    job_id = uuid.uuid4().hex
+    cancel_event = threading.Event()
+    with _external_upload_jobs_lock:
+        _external_upload_cancel_events[task_id] = cancel_event
+        _external_upload_jobs[job_id] = {
+            "job_id": job_id,
+            "task_id": task_id,
+            "status": "running",
+            "created_at": _utc_now(),
+            "updated_at": _utc_now(),
+            "total": len(items),
+            "success": 0,
+            "skipped": 0,
+            "failed": 0,
+            "items": [],
+        }
+
+    def _worker() -> None:
+        try:
+            result = _process_external_video_library_upload(req, job_id, task_id, cancel_event)
+            if cancel_event.is_set():
+                result.update({"job_id": job_id, "task_id": task_id, "status": "cancelled", "updated_at": _utc_now()})
+                _merge_task_progress(task_id, {"stage": "upload", "status": "JSON视频上传已取消"})
+                _update_task(task_id, status="cancelled", error=None)
+                _write_task_log(task_id, "JSON视频上传已取消。")
+            else:
+                result.update({"job_id": job_id, "task_id": task_id, "status": "done", "updated_at": _utc_now()})
+                completed_count = result.get("success", 0) + result.get("skipped", 0)
+                final_status = "done" if completed_count > 0 or result.get("total", 0) == 0 else "failed"
+                _merge_task_progress(
+                    task_id,
+                    {
+                        "stage": "upload",
+                        "status": f"JSON视频上传完成：成功 {result.get('success', 0)}，跳过 {result.get('skipped', 0)}，失败 {result.get('failed', 0)}",
+                        "upload_count": {
+                            "done": result.get("total", 0),
+                            "total": result.get("total", 0),
+                        },
+                        "download_count": {
+                            "done": result.get("total", 0),
+                            "total": result.get("total", 0),
+                        },
+                    },
+                )
+                _update_task(task_id, status=final_status, error=None if final_status == "done" else "全部上传失败")
+                _write_task_log(
+                    task_id,
+                    f"JSON视频上传完成：成功 {result.get('success', 0)}，跳过 {result.get('skipped', 0)}，失败 {result.get('failed', 0)}。",
+                )
+        except Exception as exc:
+            result = {
+                "job_id": job_id,
+                "task_id": task_id,
+                "status": "failed",
+                "updated_at": _utc_now(),
+                "error": str(exc),
+                "total": 0,
+                "success": 0,
+                "skipped": 0,
+                "failed": 1,
+                "items": [],
+            }
+            _update_task(task_id, status="failed", error=str(exc))
+            _write_task_log(task_id, f"JSON视频上传失败: {exc}")
+        with _external_upload_jobs_lock:
+            _external_upload_jobs[job_id] = result
+            if _external_upload_cancel_events.get(task_id) is cancel_event:
+                _external_upload_cancel_events.pop(task_id, None)
+
+    threading.Thread(target=_worker, daemon=True, name=f"external-upload-{job_id[:8]}").start()
+    return {"job_id": job_id, "task_id": task_id, "status": "running"}
+
+
+@app.post("/external/video-library/upload", dependencies=[Depends(_require_token)])
+@app.post("/external/video-library/ingest", dependencies=[Depends(_require_token)])
+async def upload_external_video_library(
+    request: Request,
+    category: Optional[str] = Query(default=None),
+    limit: Optional[int] = Query(default=None),
+) -> dict:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON。")
+    req = _external_upload_request_from_body(body, category=category, limit=limit)
+    return _start_external_video_library_upload(req)
+
+
+@app.get("/external/video-library/jobs/{job_id}", dependencies=[Depends(_require_token)])
+def get_external_video_library_job(job_id: str) -> dict:
+    with _external_upload_jobs_lock:
+        job = _external_upload_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="上传任务不存在。")
+    return _repair_mojibake_value(job)  # type: ignore[return-value]
+
+
+@app.get("/external/video-library/progress", dependencies=[Depends(_require_token)])
+def get_external_video_library_progress_summary() -> dict:
+    """Return durable aggregate progress across every JSON video upload task."""
+    with _db_connect() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, status, created_at, updated_at, progress_json
+            FROM tasks
+            WHERE channel=?
+            ORDER BY id DESC
+            """,
+            ("JSON视频上传",),
+        ).fetchall()
+
+    totals = {
+        "total": 0,
+        "completed": 0,
+        "pending": 0,
+        "uploading": 0,
+        "success": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+    for raw_task in rows:
+        task = dict(raw_task)
+        try:
+            progress = json.loads(task.get("progress_json") or "{}")
+        except json.JSONDecodeError:
+            progress = {}
+        progress = progress if isinstance(progress, dict) else {}
+        files = progress.get("files")
+        file_values = list(files.values()) if isinstance(files, dict) else []
+        upload_count = progress.get("upload_count")
+        expected_total = 0
+        if isinstance(upload_count, dict):
+            try:
+                expected_total = max(0, int(upload_count.get("total") or 0))
+            except (TypeError, ValueError):
+                expected_total = 0
+        expected_total = max(expected_total, len(file_values))
+        totals["total"] += expected_total
+        counted = 0
+        for item in file_values:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("upload_status") or item.get("status") or "pending")
+            if status == "done":
+                totals["success"] += 1
+                totals["completed"] += 1
+            elif status == "skipped":
+                totals["skipped"] += 1
+                totals["completed"] += 1
+            elif status == "failed":
+                totals["failed"] += 1
+                totals["completed"] += 1
+            elif status in ("uploading", "running", "downloading"):
+                totals["uploading"] += 1
+            else:
+                totals["pending"] += 1
+            counted += 1
+        remaining = max(0, expected_total - counted)
+        if remaining:
+            if str(task.get("status") or "") == "failed":
+                totals["failed"] += remaining
+                totals["completed"] += remaining
+            else:
+                totals["pending"] += remaining
+
+    return _repair_mojibake_value(
+        {"task_total": len(rows), **totals}
+    )  # type: ignore[return-value]
+
+
+@app.get(
+    "/external/video-library/tasks/{task_id}/progress",
+    dependencies=[Depends(_require_token)],
+)
+def get_external_video_library_progress(task_id: int) -> dict:
+    """Return durable JSON-upload progress for external systems polling by task ID."""
+    task = _fetch_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="JSON 视频上传任务不存在。")
+    if str(task.get("channel") or "") != "JSON视频上传":
+        raise HTTPException(status_code=400, detail="该 task_id 不是 JSON 视频上传任务。")
+
+    raw_progress = task.get("progress_json") or "{}"
+    try:
+        progress = json.loads(raw_progress) if isinstance(raw_progress, str) else raw_progress
+    except json.JSONDecodeError:
+        progress = {}
+    if not isinstance(progress, dict):
+        progress = {}
+
+    file_response = get_task_files(task_id)
+    files = list(file_response.get("items") or [])
+    counts = {"done": 0, "skipped": 0, "failed": 0, "uploading": 0, "pending": 0}
+    for item in files:
+        status = str(item.get("upload_status") or item.get("status") or "pending")
+        if status in counts:
+            counts[status] += 1
+        elif status in ("running", "downloading"):
+            counts["uploading"] += 1
+        else:
+            counts["pending"] += 1
+    upload_count = progress.get("upload_count")
+    if not isinstance(upload_count, dict):
+        upload_count = {}
+    total = int(upload_count.get("total") or len(files) or 0)
+    completed = counts["done"] + counts["skipped"] + counts["failed"]
+    return _repair_mojibake_value(
+        {
+            "task_id": task_id,
+            "status": task.get("status"),
+            "message": progress.get("status") or "",
+            "stage": progress.get("stage") or "upload",
+            "created_at": task.get("created_at"),
+            "updated_at": task.get("updated_at"),
+            "total": total,
+            "completed": completed,
+            "pending": max(0, total - completed - counts["uploading"]),
+            "uploading": counts["uploading"],
+            "success": counts["done"],
+            "skipped": counts["skipped"],
+            "failed": counts["failed"],
+            "files": files,
+        }
+    )  # type: ignore[return-value]
+
+
+def _request_external_upload_cancel(task_id: int) -> bool:
+    with _external_upload_jobs_lock:
+        cancel_event = _external_upload_cancel_events.get(task_id)
+    if cancel_event is None:
+        return False
+    cancel_event.set()
+    return True
+
+
+def _process_external_video_library_upload(
+    req: ExternalVideoLibraryUploadRequest,
+    job_id: str,
+    task_id: int,
+    cancel_event: Optional[threading.Event] = None,
+) -> dict:
+    config = _load_config()
+    base_url = str(config.get("upload_base_url") or "").strip()
+    if not base_url:
+        raise HTTPException(status_code=400, detail="未配置上传服务地址。")
+    uploader = UploadClient(
+        base_url=base_url,
+        account=str(config.get("upload_account") or ""),
+        password=str(config.get("upload_password") or ""),
+        api_token=str(config.get("upload_api_token") or ""),
+        meta_url=config.get("video_meta_url"),
+        movie_create_url=config.get("movie_create_url"),
+        movie_category_default=config.get("movie_category_default"),
+        debug=True,
+        log_cb=lambda msg: _write_task_log(task_id, msg),
+    )
+    if not uploader.movie_create_url:
+        raise HTTPException(status_code=400, detail="未配置长视频影片接口 movie_create_url。")
+    # Resolve account/password authentication once before worker threads share it.
+    if not uploader.token and uploader.account and uploader.password:
+        uploader._auth_headers()
+
+    items = _external_library_items(req.payload)
+    if req.limit is not None:
+        items = items[: max(0, int(req.limit))]
+    category = str(
+        req.category or config.get("movie_category_default") or "纪录片"
+    ).strip() or "纪录片"
+    results: list[dict] = []
+    success = 0
+    skipped = 0
+    with _external_upload_jobs_lock:
+        if job_id in _external_upload_jobs:
+            _external_upload_jobs[job_id].update(
+                {"total": len(items), "success": 0, "skipped": 0, "failed": 0, "items": [], "updated_at": _utc_now()}
+            )
+
+    def _process_item(index: int, item: dict) -> dict:
+        if cancel_event is not None and cancel_event.is_set():
+            return {"index": index, "status": "cancelled"}
+        title = _repair_mojibake_text(str(item.get("title") or "")).strip()
+        if not title:
+            title = str(item.get("pageKey") or item.get("pageUrl") or f"video-{index}")
+        tags = _external_tag_texts(item)
+        video_url = _external_video_url(item)
+        cover_url = _external_cover_url(item)
+        row: dict = {
+            "index": index,
+            "title": title,
+            "content": title,
+            "tags": tags,
+            "video_url": video_url,
+            "cover_url": cover_url,
+            "status": "pending",
+        }
+        _merge_task_progress(
+            task_id,
+            {
+                "stage": "upload",
+                "status": f"JSON视频上传中 {index}/{len(items)}",
+                "upload_count": {"done": len(results), "total": len(items)},
+                "download_count": {"done": len(results), "total": len(items)},
+                "files": {
+                    str(index): {
+                        "message_id": index,
+                        "file_name": title,
+                        "source_file_name": _file_name_from_url(video_url, f"external_{index}.mp4", ".mp4") if video_url else f"external_{index}.mp4",
+                        "title": title,
+                        "caption": title,
+                        "description": title,
+                        "tags": tags,
+                        "status": "uploading",
+                        "upload_status": "uploading",
+                    }
+                },
+            },
+        )
+        _write_task_log(task_id, f"开始上传 JSON 视频 {index}/{len(items)}：{title}")
+        try:
+            if not video_url:
+                raise RuntimeError("JSON 中缺少 capturedDownload.url。")
+            file_name = _file_name_from_url(video_url, f"external_{index}.mp4", ".mp4")
+            local_video_path = _external_json_video_path(task_id, index, file_name)
+            _write_task_log(
+                task_id,
+                f"JSON视频下载路径：index={index} path={local_video_path}",
+            )
+            _write_task_log(
+                task_id,
+                f"MD5加密源数据：source=JSON视频上传 index={index} file={file_name} local_path={local_video_path} url={video_url}",
+            )
+            known_md5, known_file_size = _external_known_md5(task_id, video_url)
+
+            def _on_md5_ready(value: str, file_size: int, reused: bool) -> None:
+                _record_external_md5(
+                    task_id,
+                    video_url,
+                    file_name,
+                    value,
+                    file_size,
+                    local_video_path,
+                )
+                if reused:
+                    _write_task_log(
+                        task_id,
+                        f"MD5加密记录复用：source=JSON视频上传 index={index} file={file_name} hashed_bytes={file_size} md5={value}",
+                    )
+                else:
+                    _write_task_log(
+                        task_id,
+                        f"MD5加密结果：source=JSON视频上传 index={index} file={file_name} hashed_bytes={file_size} md5={value}",
+                    )
+
+            video_upload = _upload_json_video_with_deduplication(
+                uploader,
+                video_url,
+                file_name,
+                log_cb=lambda msg: _write_task_log(task_id, msg),
+                known_md5=known_md5,
+                known_file_size=known_file_size,
+                on_md5_ready=_on_md5_ready,
+                local_path=local_video_path,
+            )
+            video_id = int(video_upload.get("upload_id") or 0)
+            content_md5 = str(video_upload.get("content_md5") or "").lower()
+            hashed_bytes = int(video_upload.get("hashed_bytes") or 0)
+            duplicate = video_upload.get("duplicate")
+            if duplicate:
+                _write_task_log(
+                    task_id,
+                    f"MD5重复：JSON视频 {file_name} md5={content_md5} 已存在 {duplicate.get('channel')}#{duplicate.get('message_id')} upload_id={duplicate.get('upload_id')}，整条跳过上传。",
+                )
+                raise _SkipExternalJsonVideo()
+            _write_task_log(
+                task_id,
+                f"直传上传完成：{file_name} upload_id={video_id} md5={content_md5 or '-'}",
+            )
+            thumbnail_id = 0
+            if cover_url:
+                cover_name = _file_name_from_url(cover_url, f"external_{index}.jpg", ".jpg")
+                try:
+                    _write_task_log(
+                        task_id,
+                        f"开始上传封面：source=cover.url index={index} file={cover_name} url={cover_url}",
+                    )
+                    cover_upload = _upload_remote_media(
+                        uploader,
+                        cover_url,
+                        cover_name,
+                        "image",
+                        log_cb=lambda msg: _write_task_log(task_id, msg),
+                    )
+                    thumbnail_id = int(cover_upload.get("upload_id") or 0)
+                    _write_task_log(
+                        task_id,
+                        f"封面上传完成：source=cover.url index={index} thumbnail_id={thumbnail_id or '-'}",
+                    )
+                except Exception as exc:
+                    row["cover_error"] = str(exc)
+                    _write_task_log(
+                        task_id,
+                        f"封面上传失败：source=cover.url index={index} {exc}",
+                    )
+            else:
+                _write_task_log(task_id, f"未找到封面：index={index} JSON 缺少 cover.url")
+            _write_task_log(
+                task_id,
+                f"影片标题同步：title_len={len(title)} content_len={len(title)} same=True",
+            )
+            uploader.create_movie_record(
+                title=title,
+                category=category,
+                content=title,
+                tags=tags,
+                video_id=video_id,
+                thumbnail_id=thumbnail_id,
+            )
+            _write_task_log(
+                task_id,
+                f"JSON影片提交数据：title={title} content={title} category={category} tags={tags} video_id={video_id} thumbnail_id={thumbnail_id or '-'} Categories={[category]}",
+            )
+            local_deleted = False
+            try:
+                if local_video_path.exists():
+                    local_video_path.unlink()
+                    local_deleted = True
+                    _write_task_log(
+                        task_id,
+                        f"JSON视频本地文件已删除：index={index} path={local_video_path}",
+                    )
+            except OSError as exc:
+                _write_task_log(
+                    task_id,
+                    f"JSON视频本地文件删除失败，保留用于重试：index={index} path={local_video_path} error={exc}",
+                )
+            row.update(
+                {
+                    "status": "done",
+                    "video_id": video_id,
+                    "thumbnail_id": thumbnail_id,
+                    "cover_id": thumbnail_id,
+                    "thumb_id": thumbnail_id,
+                    "cover_source": "cover.url" if cover_url else "",
+                    "cover_url": cover_url,
+                    "category": category,
+                    "content_md5": content_md5,
+                    "file_size": int(video_upload.get("file_size") or hashed_bytes or 0),
+                    "reused_video_upload": False,
+                    "local_path": str(local_video_path),
+                    "local_deleted": local_deleted,
+                }
+            )
+            _write_task_log(task_id, f"JSON视频上传完成：{index} video_id={video_id} thumbnail_id={thumbnail_id or '-'} md5={content_md5 or '-'}")
+        except _SkipExternalJsonVideo:
+            row.update(
+                {
+                    "status": "skipped",
+                    "video_id": video_id,
+                    "content_md5": content_md5,
+                    "file_size": int(video_upload.get("file_size") or hashed_bytes or 0),
+                    "local_path": str(local_video_path),
+                    "skip_reason": "MD5重复",
+                }
+            )
+            _write_task_log(task_id, f"JSON视频上传跳过：{index} MD5重复，不上传视频、封面或影片记录。")
+        except Exception as exc:
+            row.update({"status": "failed", "error": str(exc)})
+            _write_task_log(task_id, f"JSON视频上传失败：{index} {exc}")
+        return row
+
+    def _record_item_result(row: dict) -> None:
+        nonlocal success, skipped
+        with _task_progress_write_lock:
+            results.append(row)
+            results.sort(key=lambda value: int(value.get("index") or 0))
+            success = sum(1 for value in results if value.get("status") == "done")
+            skipped = sum(1 for value in results if value.get("status") == "skipped")
+            completed = len(results)
+            failed = sum(1 for value in results if value.get("status") == "failed")
+        _merge_task_progress(
+            task_id,
+            {
+                "stage": "upload",
+                "status": f"JSON视频上传中 {completed}/{len(items)}",
+                "upload_count": {"done": completed, "total": len(items)},
+                "download_count": {"done": completed, "total": len(items)},
+                "files": {
+                    str(row.get("index")): {
+                        "message_id": row.get("index"),
+                        "file_name": row.get("title"),
+                        "source_file_name": _file_name_from_url(str(row.get("video_url") or ""), f"external_{row.get('index')}.mp4", ".mp4"),
+                        "title": row.get("title"),
+                        "caption": row.get("title"),
+                        "description": row.get("content"),
+                        "tags": row.get("tags") or [],
+                        "status": row.get("status") or "failed",
+                        "upload_status": row.get("status"),
+                        "upload_id": row.get("video_id"),
+                        "thumbnail_id": row.get("thumbnail_id"),
+                        "cover_id": row.get("cover_id"),
+                        "thumb_id": row.get("thumb_id"),
+                        "video_url": row.get("video_url"),
+                        "local_path": row.get("local_path"),
+                        "local_deleted": row.get("local_deleted"),
+                        "cover_url": row.get("cover_url"),
+                        "content_md5": row.get("content_md5"),
+                        "reused_video_upload": row.get("reused_video_upload"),
+                        "skip_reason": row.get("skip_reason"),
+                        "bytes_total": row.get("file_size"),
+                        "bytes_downloaded": row.get("file_size"),
+                        "error": row.get("error"),
+                    }
+                },
+            },
+        )
+        with _external_upload_jobs_lock:
+            if job_id in _external_upload_jobs:
+                _external_upload_jobs[job_id].update(
+                    {
+                        "total": len(items),
+                        "success": success,
+                        "skipped": skipped,
+                        "failed": failed,
+                        "items": list(results),
+                        "updated_at": _utc_now(),
+                    }
+                )
+
+    concurrency = 1
+    _write_task_log(task_id, "JSON视频上传模式：逐条顺序处理。")
+    item_iterator = iter(enumerate(items, start=1))
+    pending: dict[object, int] = {}
+    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="json-video-upload") as executor:
+        def _submit_one() -> bool:
+            if cancel_event is not None and cancel_event.is_set():
+                return False
+            try:
+                index, item = next(item_iterator)
+            except StopIteration:
+                return False
+            pending[executor.submit(_process_item, index, item)] = index
+            return True
+
+        for _ in range(min(concurrency, len(items))):
+            if not _submit_one():
+                break
+        while pending:
+            future = next(as_completed(pending))
+            pending.pop(future, None)
+            try:
+                row = future.result()
+            except Exception as exc:
+                row = {"index": 0, "status": "failed", "error": str(exc)}
+            if row.get("status") != "cancelled":
+                _record_item_result(row)
+            _submit_one()
+
+    return _repair_mojibake_value(
+        {
+            "task_id": task_id,
+            "total": len(items),
+            "success": success,
+            "skipped": skipped,
+            "failed": len(items) - success - skipped,
+            "items": results,
+        }
+    )  # type: ignore[return-value]
+
+
 @app.get("/tasks/{task_id}/log", dependencies=[Depends(_require_token)])
 def get_task_log(
     task_id: int,
@@ -3336,8 +4763,59 @@ def list_tasks(
     )  # type: ignore[return-value]
 
 
-def _login_key(api_id: str, api_hash: str, output_dir: str) -> str:
-    return f"{api_id}:{api_hash}:{output_dir}"
+def _login_key(api_id: str, api_hash: str, output_dir: str, phone: str = "") -> str:
+    # Keep API credentials and phone numbers out of both memory keys and SQLite.
+    raw_key = f"{api_id}:{api_hash}:{output_dir}:{phone}"
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+def _save_login_code(login_key: str, code_hash: str) -> None:
+    created_at = time.time()
+    with _login_lock:
+        _login_codes[login_key] = code_hash
+    _db_write(
+        lambda conn: conn.execute(
+            """
+            INSERT INTO login_code_requests (login_key, code_hash, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(login_key) DO UPDATE SET
+                code_hash=excluded.code_hash,
+                created_at=excluded.created_at
+            """,
+            (login_key, code_hash, created_at),
+        )
+    )
+
+
+def _load_login_code(login_key: str) -> Optional[str]:
+    with _login_lock:
+        cached = _login_codes.get(login_key)
+    if cached:
+        return cached
+    with _db_connect() as conn:
+        row = conn.execute(
+            "SELECT code_hash, created_at FROM login_code_requests WHERE login_key=?",
+            (login_key,),
+        ).fetchone()
+    if not row:
+        return None
+    code_hash, created_at = str(row[0] or ""), float(row[1] or 0)
+    if not code_hash or time.time() - created_at > LOGIN_CODE_TTL_SECONDS:
+        _delete_login_code(login_key)
+        return None
+    with _login_lock:
+        _login_codes[login_key] = code_hash
+    return code_hash
+
+
+def _delete_login_code(login_key: str) -> None:
+    with _login_lock:
+        _login_codes.pop(login_key, None)
+    _db_write(
+        lambda conn: conn.execute(
+            "DELETE FROM login_code_requests WHERE login_key=?", (login_key,)
+        )
+    )
 
 
 def _resolve_telegram_credentials(
@@ -3813,17 +5291,16 @@ async def send_login_code(req: LoginRequest) -> dict:
     try:
         sent = await _with_client_lock_async(_do_send)
     except PhoneNumberInvalidError:
-        raise HTTPException(status_code=400, detail="æ‰‹æœºå·æ ¼å¼ä¸æ­£ç¡®ï¼Œè¯·æ£€æŸ¥å›½å®¶åŒºå·å’Œå·ç ã€‚")
+        raise HTTPException(status_code=400, detail="手机号格式不正确，请检查国家区号和号码。")
     except RPCError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     code_hash = getattr(sent, "phone_code_hash", "")
     if not code_hash:
-        raise HTTPException(status_code=500, detail="æœªèŽ·å–éªŒè¯ç å“ˆå¸Œ")
-    key = _login_key(api_id, api_hash, output_dir_text)
-    with _login_lock:
-        _login_codes[key] = code_hash
+        raise HTTPException(status_code=500, detail="未获取到验证码会话，请重新发送验证码。")
+    key = _login_key(api_id, api_hash, output_dir_text, req.phone)
+    _save_login_code(key, code_hash)
     return {"status": "code_sent"}
 
 
@@ -3832,11 +5309,13 @@ async def verify_login_code(req: VerifyRequest) -> dict:
     api_id, api_hash = _resolve_telegram_credentials(req.api_id, req.api_hash)
     output_dir_text = _resolve_login_output_dir(req.output_dir)
     _validate_login_input(api_id, api_hash, req.phone)
-    key = _login_key(api_id, api_hash, output_dir_text)
-    with _login_lock:
-        code_hash = _login_codes.get(key)
+    key = _login_key(api_id, api_hash, output_dir_text, req.phone)
+    code_hash = _load_login_code(key)
     if not code_hash:
-        raise HTTPException(status_code=400, detail="è¯·å…ˆå‘é€éªŒè¯ç ")
+        raise HTTPException(
+            status_code=400,
+            detail="请先发送验证码，或验证码会话已过期，请重新发送。",
+        )
     output_dir = _ensure_output_dir(output_dir_text)
     async def _do_sign_in() -> None:
         async def _sign_in(client: TelegramClient) -> None:
@@ -3854,8 +5333,7 @@ async def verify_login_code(req: VerifyRequest) -> dict:
         try:
             await _with_client_retry(api_id, api_hash, output_dir, _sign_in)
         finally:
-            with _login_lock:
-                _login_codes.pop(key, None)
+            _delete_login_code(key)
 
     await _with_client_lock_async(_do_sign_in)
     _sync_pool_session_to_output(api_id, api_hash, output_dir)
@@ -3964,9 +5442,6 @@ async def logout(
             session_file.unlink()
         except Exception:
             pass
-    key = _login_key(api_id, api_hash, output_dir_text)
-    with _login_lock:
-        _login_codes.pop(key, None)
     return {"status": "logged_out"}
 
 
@@ -4249,6 +5724,14 @@ def cancel_task(task_id: int) -> dict:
         _update_task(task_id, status="cancelled")
         _write_task_log(task_id, "任务已取消。")
         return {"id": task_id, "status": "cancelled"}
+    if str(task.get("channel") or "") == "JSON视频上传":
+        if _request_external_upload_cancel(task_id):
+            _update_task(task_id, status="cancel_requested")
+            _write_task_log(task_id, "已请求取消 JSON 视频上传。")
+            return {"id": task_id, "status": "cancel_requested"}
+        _update_task(task_id, status="cancelled")
+        _write_task_log(task_id, "JSON 视频上传未在运行，已标记为取消。")
+        return {"id": task_id, "status": "cancelled"}
     _update_task(task_id, status="cancel_requested")
     task_runner.cancel(task_id)
     return {"id": task_id, "status": "cancel_requested"}
@@ -4261,6 +5744,16 @@ def retry_task(task_id: int) -> dict:
         raise HTTPException(status_code=404, detail="任务不存在")
     if task["status"] == "running":
         raise HTTPException(status_code=400, detail="任务运行中，请先取消")
+    if str(task.get("channel") or "") == "JSON视频上传":
+        if task["status"] not in ("failed", "cancelled"):
+            return {"id": task_id, "status": task["status"]}
+        req = _external_upload_request_from_task(task)
+        if req is None:
+            raise HTTPException(
+                status_code=400,
+                detail="该旧 JSON 上传任务未保存原始视频地址，无法重试，请重新提交 JSON。",
+            )
+        return _start_external_video_library_upload(req, task_id=task_id)
     if task["status"] in ("failed", "cancelled"):
         _update_task(task_id, status="pending", error=None, progress_json=json.dumps({}))
         _write_task_log(task_id, "已重试：继续当前任务。")

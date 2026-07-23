@@ -1,11 +1,15 @@
 import json
 import mimetypes
+import os
 import re
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
 import requests
+
+
+S3_UPLOAD_TIMEOUT_SECONDS = int(os.getenv("S3_UPLOAD_TIMEOUT_SECONDS", "1800"))
 
 
 _MOJIBAKE_MARKERS = ("Ã", "Â", "ä", "å", "æ", "è", "é", "ç", "ð", "œ", "Š", "€")
@@ -330,7 +334,9 @@ class UploadClient:
                     "Content-Length": str(total),
                     "Connection": "close",
                 },
-                timeout=(10, 600),
+                # requests applies a tuple's connect timeout while writing the body too.
+                # Use one long socket timeout so slow S3 writes are not cut off early.
+                timeout=S3_UPLOAD_TIMEOUT_SECONDS,
             )
             resp.raise_for_status()
             if progress_file.sent != total:
@@ -394,7 +400,7 @@ class UploadClient:
                 "Content-Length": str(total),
                 "Connection": "close",
             },
-            timeout=(10, 600),
+            timeout=S3_UPLOAD_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
         if sent != total:
@@ -419,6 +425,27 @@ class UploadClient:
         self._put_reader_to_s3(upload_url, file_name, reader, total, content_type, _wrap)
         self._log(f"已直传：{file_name}")
         self._notify_upload_finish(upload_id, upload_url, "video")
+        return upload_id
+
+    def upload_image_reader(
+        self,
+        file_name: str,
+        reader,
+        total: int,
+        content_type: Optional[str] = None,
+    ) -> int:
+        content_type = content_type or self._guess_content_type_by_name(file_name)
+        upload_url, upload_id = self._get_upload_url(Path(file_name), content_type, "image")
+        self._log(f"开始直传图片：{file_name}")
+        progress_cb = self.progress_cb
+
+        def _wrap(data: dict) -> None:
+            if progress_cb:
+                progress_cb({**data, "is_video": False})
+
+        self._put_reader_to_s3(upload_url, file_name, reader, total, content_type, _wrap)
+        self._log(f"已直传图片：{file_name}")
+        self._notify_upload_finish(upload_id, upload_url, "image")
         return upload_id
 
     def upload_video_file(self, file_path: Path) -> int:
@@ -505,9 +532,13 @@ class UploadClient:
         headers = self._auth_headers()
         tags = _limit_tags(tags)
         title = _movie_title_from_content(content, title)
+        category = str(category or "").strip() or self.movie_category_default or "纪录片"
+        categories = [category]
         payload = {
             "title": title,
             "category": category,
+            "categories": categories,
+            "Categories": categories,
             "content": content,
             "tags": tags,
             "video_id": video_id,

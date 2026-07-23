@@ -91,6 +91,9 @@ export default {
       }
       return this.form.outputDir
     },
+    errorMessage(error, fallback) {
+      return (error && error.response && error.response.data && error.response.data.detail) || error.message || fallback
+    },
     requireLoginFields() {
       if (!this.form.apiId || !this.form.apiHash) {
         this.$message.warning('请填写 API ID 和 API Hash')
@@ -119,13 +122,21 @@ export default {
         this.saveLocalForm()
         this.$message.success('验证码已发送')
       } catch (error) {
-        this.$message.error(error.message || '发送验证码失败')
+        this.$message.error(this.errorMessage(error, '发送验证码失败'))
       } finally {
         this.sendingCode = false
       }
     },
     async verifyCode() {
       if (!this.requireLoginFields()) return
+      if (!this.form.phoneNumber) {
+        this.$message.warning('请先填写手机号')
+        return
+      }
+      if (!this.form.code) {
+        this.$message.warning('请先填写验证码')
+        return
+      }
       this.loggingIn = true
       try {
         await verifyLoginCode({
@@ -140,7 +151,7 @@ export default {
         this.saveLocalForm()
         this.$message.success('登录成功')
       } catch (error) {
-        this.$message.error(error.message || '登录失败')
+        this.$message.error(this.errorMessage(error, '登录失败'))
       } finally {
         this.loggingIn = false
       }

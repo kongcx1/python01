@@ -54,6 +54,12 @@ export const constantRoutes = [
         name: 'DownloadCompleted',
         component: () => import('@/views/download/completed'),
         meta: { title: '完成列表', icon: 'finished' }
+      },
+      {
+        path: 'external-library',
+        name: 'ExternalVideoLibrary',
+        component: () => import('@/views/download/external-library'),
+        meta: { title: 'JSON上传', icon: 'upload' }
       }
     ]
   }
