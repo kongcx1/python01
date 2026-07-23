@@ -35,7 +35,7 @@ Submit an external JSON video library for asynchronous upload. This is the recom
 
 Compatibility endpoint: `POST /external/video-library/upload` has identical behavior.
 
-The endpoint returns immediately after creating a task; downloading the remote video, calculating MD5, uploading the video/cover, and creating the movie record continue in the background. Use the returned `job_id` or `task_id` to track the result.
+The endpoint returns immediately after creating a task; downloading the remote video, calculating MD5, uploading the video/cover, and creating the movie record continue in the background. A maximum of 10 JSON upload tasks run at the same time; additional task IDs remain `pending` until a slot is available. Use the returned `job_id` or `task_id` to track the result.
 
 Query params:
 - `category` (optional): movie category. If omitted, uses `movie_category_default`; falls back to `纪录片`.
@@ -99,7 +99,7 @@ Success response:
 {
   "job_id": "c27da3a7f19b4d619ec5ac5d91652a15",
   "task_id": 158,
-  "status": "running"
+  "status": "pending"
 }
 ```
 

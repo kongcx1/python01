@@ -50,12 +50,13 @@ DEFAULT_VIDEO_META_URL = "https://userapi.sfthyf.cn/api/short/create"
 DEFAULT_MOVIE_CREATE_URL = "https://userapi.sfthyf.cn/api/movie/create"
 DEFAULT_VIDEO_TYPE_THRESHOLD_SECONDS = 600
 MIN_VIDEO_DURATION_SECONDS = int(os.getenv("MIN_VIDEO_DURATION_SECONDS", "10"))
-DEFAULT_MAX_RUNNING_TASKS = int(os.getenv("MAX_RUNNING_TASKS", "2"))
+DEFAULT_MAX_RUNNING_TASKS = 1
+EXTERNAL_JSON_TASK_CONCURRENCY = 10
 PREVIEW_SOFT_TIMEOUT_SECONDS = 18
 PREVIEW_HARD_TIMEOUT_SECONDS = 24
 AUTH_STATUS_TIMEOUT_SECONDS = 8
 SPARK_MD5_HELPER = Path(__file__).resolve().parent / "tools" / "spark_md5_file.js"
-SERVER_CODE_VERSION = "2026-07-22-external-progress-summary-v36"
+SERVER_CODE_VERSION = "2026-07-23-cancel-status-final-v40"
 _server_version_cache: Optional[str] = None
 _db_init_lock = threading.Lock()
 _db_initialized = False
@@ -184,6 +185,10 @@ _task_session_locks_lock = threading.Lock()
 _external_upload_jobs: dict[str, dict] = {}
 _external_upload_jobs_lock = threading.Lock()
 _external_upload_cancel_events: dict[int, threading.Event] = {}
+_external_upload_executor = ThreadPoolExecutor(
+    max_workers=EXTERNAL_JSON_TASK_CONCURRENCY,
+    thread_name_prefix="external-json-task",
+)
 _task_progress_write_lock = threading.RLock()
 _json_md5_locks: dict[str, threading.Lock] = {}
 _json_md5_locks_lock = threading.Lock()
@@ -877,7 +882,7 @@ def _external_upload_progress(
 ) -> dict:
     progress = {
         "stage": "upload",
-        "status": "JSON视频上传准备中",
+        "status": "JSON视频上传等待执行中",
         "download_count": {"done": 0, "total": total},
         "upload_count": {"done": 0, "total": total},
         "files": {},
@@ -913,7 +918,7 @@ def _create_external_upload_task(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                "running",
+                "pending",
                 "JSON视频上传",
                 json.dumps([], ensure_ascii=False),
                 None,
@@ -934,7 +939,7 @@ def _create_external_upload_task(
     _cache_task(
         {
             "id": task_id,
-            "status": "running",
+            "status": "pending",
             "channel": "JSON视频上传",
             "message_ids": json.dumps([], ensure_ascii=False),
             "start_date": None,
@@ -1377,13 +1382,15 @@ class TaskRunner:
         for running in running_tasks:
             running.stop_event.set()
 
-    def cancel(self, task_id: int) -> None:
+    def cancel(self, task_id: int) -> bool:
         with self._running_lock:
             running = self._running.get(task_id)
-        if running:
-            running.stop_event.set()
-            _update_task(task_id, status="cancel_requested")
-            _write_task_log(task_id, "收到取消请求。")
+        if not running:
+            return False
+        running.stop_event.set()
+        _update_task(task_id, status="cancelled")
+        _write_task_log(task_id, "已取消任务，正在等待当前网络操作结束。")
+        return True
 
     def remove_ids(self, task_id: int, ids: list[int]) -> None:
         with self._running_lock:
@@ -1410,13 +1417,9 @@ class TaskRunner:
         return True
 
     def _max_running_tasks(self) -> int:
-        config = _load_config()
-        raw_value = config.get("max_running_tasks")
-        try:
-            value = int(raw_value)
-        except (TypeError, ValueError):
-            value = DEFAULT_MAX_RUNNING_TASKS
-        return max(1, min(8, value))
+        # Telegram downloads share account sessions and local manifests.
+        # Keep this queue strictly serial to avoid session/database contention.
+        return DEFAULT_MAX_RUNNING_TASKS
 
     def _running_count(self) -> int:
         with self._running_lock:
@@ -1464,11 +1467,19 @@ class TaskRunner:
                 _update_task(task_id, status="done")
                 _write_task_log(task_id, "任务完成。")
         except Exception as exc:
-            _update_task(task_id, status="failed", error=str(exc))
-            _write_task_log(task_id, f"任务失败: {exc}")
+            if stop_event.is_set():
+                _update_task(task_id, status="cancelled", error=None)
+                _write_task_log(task_id, "任务已取消。")
+            else:
+                _update_task(task_id, status="failed", error=str(exc))
+                _write_task_log(task_id, f"任务失败: {exc}")
         except BaseException as exc:
-            _update_task(task_id, status="failed", error=str(exc))
-            _write_task_log(task_id, f"任务异常中止: {exc}")
+            if stop_event.is_set():
+                _update_task(task_id, status="cancelled", error=None)
+                _write_task_log(task_id, "任务已取消。")
+            else:
+                _update_task(task_id, status="failed", error=str(exc))
+                _write_task_log(task_id, f"任务异常中止: {exc}")
         finally:
             with self._running_lock:
                 self._running.pop(task_id, None)
@@ -2824,9 +2835,14 @@ def _parse_date(value: Optional[str]) -> Optional[date]:
 
 _ensure_db()
 task_runner = TaskRunner()
-task_runner.start()
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+async def _start_task_runner() -> None:
+    # Start only after this module has finished defining the Telegram helpers.
+    task_runner.start()
 
 _cors_origins = [
     "http://localhost:9528",
@@ -4041,13 +4057,16 @@ def _start_external_video_library_upload(
         )
         _update_task(
             task_id,
-            status="running",
+            status="pending",
             error=None,
             progress_json=json.dumps(progress, ensure_ascii=False),
         )
     _write_task_version_log(task_id)
     action = "任务重试" if is_retry else "任务开始"
-    _write_task_log(task_id, f"JSON视频上传{action}：共 {len(items)} 条。")
+    _write_task_log(
+        task_id,
+        f"JSON视频上传{action}：共 {len(items)} 条，等待全局任务执行位。",
+    )
 
     job_id = uuid.uuid4().hex
     cancel_event = threading.Event()
@@ -4056,7 +4075,7 @@ def _start_external_video_library_upload(
         _external_upload_jobs[job_id] = {
             "job_id": job_id,
             "task_id": task_id,
-            "status": "running",
+            "status": "pending",
             "created_at": _utc_now(),
             "updated_at": _utc_now(),
             "total": len(items),
@@ -4068,7 +4087,33 @@ def _start_external_video_library_upload(
 
     def _worker() -> None:
         try:
-            result = _process_external_video_library_upload(req, job_id, task_id, cancel_event)
+            if cancel_event.is_set():
+                result = {
+                    "task_id": task_id,
+                    "total": len(items),
+                    "success": 0,
+                    "skipped": 0,
+                    "failed": 0,
+                    "items": [],
+                }
+            else:
+                with _external_upload_jobs_lock:
+                    if job_id in _external_upload_jobs:
+                        _external_upload_jobs[job_id].update(
+                            {"status": "running", "updated_at": _utc_now()}
+                        )
+                _update_task(task_id, status="running", error=None)
+                _merge_task_progress(
+                    task_id,
+                    {"stage": "upload", "status": "JSON视频上传开始执行"},
+                )
+                _write_task_log(
+                    task_id,
+                    f"JSON视频上传开始执行：全局并发上限 {EXTERNAL_JSON_TASK_CONCURRENCY} 个任务。",
+                )
+                result = _process_external_video_library_upload(
+                    req, job_id, task_id, cancel_event
+                )
             if cancel_event.is_set():
                 result.update({"job_id": job_id, "task_id": task_id, "status": "cancelled", "updated_at": _utc_now()})
                 _merge_task_progress(task_id, {"stage": "upload", "status": "JSON视频上传已取消"})
@@ -4118,8 +4163,8 @@ def _start_external_video_library_upload(
             if _external_upload_cancel_events.get(task_id) is cancel_event:
                 _external_upload_cancel_events.pop(task_id, None)
 
-    threading.Thread(target=_worker, daemon=True, name=f"external-upload-{job_id[:8]}").start()
-    return {"job_id": job_id, "task_id": task_id, "status": "running"}
+    _external_upload_executor.submit(_worker)
+    return {"job_id": job_id, "task_id": task_id, "status": "pending"}
 
 
 @app.post("/external/video-library/upload", dependencies=[Depends(_require_token)])
@@ -5720,10 +5765,6 @@ def cancel_task(task_id: int) -> dict:
         raise HTTPException(status_code=404, detail="ä»»åŠ¡ä¸å­˜åœ¨")
     if task["status"] in ("done", "failed", "cancelled"):
         return {"id": task_id, "status": task["status"]}
-    if task["status"] == "pending":
-        _update_task(task_id, status="cancelled")
-        _write_task_log(task_id, "任务已取消。")
-        return {"id": task_id, "status": "cancelled"}
     if str(task.get("channel") or "") == "JSON视频上传":
         if _request_external_upload_cancel(task_id):
             _update_task(task_id, status="cancel_requested")
@@ -5732,9 +5773,17 @@ def cancel_task(task_id: int) -> dict:
         _update_task(task_id, status="cancelled")
         _write_task_log(task_id, "JSON 视频上传未在运行，已标记为取消。")
         return {"id": task_id, "status": "cancelled"}
-    _update_task(task_id, status="cancel_requested")
-    task_runner.cancel(task_id)
-    return {"id": task_id, "status": "cancel_requested"}
+    if task["status"] == "pending":
+        _update_task(task_id, status="cancelled")
+        _write_task_log(task_id, "任务已取消。")
+        return {"id": task_id, "status": "cancelled"}
+    if task_runner.cancel(task_id):
+        return {"id": task_id, "status": "cancelled"}
+    # A process restart can leave an old task marked as running without an
+    # in-memory worker. It cannot be cancelled cooperatively, so finish it now.
+    _update_task(task_id, status="cancelled", error=None)
+    _write_task_log(task_id, "未找到运行中的任务线程，已标记为取消。")
+    return {"id": task_id, "status": "cancelled"}
 
 
 @app.post("/tasks/{task_id}/retry", dependencies=[Depends(_require_token)])
