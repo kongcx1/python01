@@ -9,6 +9,7 @@
         <div class="header-actions">
           <el-select v-model="taskStatus" size="small" clearable placeholder="全部状态" class="status-filter" @change="handleTaskStatusChange">
             <el-option label="待处理" value="pending" />
+            <el-option label="下载中" value="downloading" />
             <el-option label="运行中" value="running" />
             <el-option label="上传中" value="uploading" />
             <el-option label="已完成" value="done" />
@@ -20,6 +21,7 @@
             <el-button size="small" icon="el-icon-search">任务管理</el-button>
           </router-link>
           <el-button size="small" icon="el-icon-refresh" :loading="tasksLoading" @click="loadTasks">刷新</el-button>
+          <el-button size="small" type="danger" plain icon="el-icon-delete-solid" :loading="cleaningLocalVideos" @click="cleanupLocalVideos">清理本地视频</el-button>
           <el-button size="small" plain icon="el-icon-close" :loading="batchCancelling" :disabled="!cancelableSelectedTasks().length" @click="cancelSelectedTasks">批量取消</el-button>
           <el-button size="small" type="warning" plain icon="el-icon-refresh-right" :loading="batchRetrying" :disabled="!retryableSelectedTasks().length" @click="retrySelectedTasks">批量重试</el-button>
           <el-button size="small" type="danger" plain icon="el-icon-delete" :disabled="!selectedTaskIds.length" @click="deleteSelectedTasks">删除所选</el-button>
@@ -98,7 +100,7 @@
 </template>
 
 <script>
-import { getTasks, getTaskLog, getTaskFiles, cancelTask, retryTask, uploadTask, deleteTask } from '@/api/download'
+import { getTasks, getTaskLog, getTaskFiles, cancelTask, retryTask, uploadTask, deleteTask, cleanupLocalVideos } from '@/api/download'
 import { formatBytes, formatSpeed, formatDateTime, parseProgress } from '@/utils/format'
 
 const TaskStateKey = 'telegram_admin_task_state'
@@ -122,6 +124,7 @@ export default {
       detailFiles: [],
       cancelingIds: [],
       uploadingIds: [],
+      cleaningLocalVideos: false,
       batchCancelling: false,
       batchRetrying: false
     }
@@ -236,6 +239,7 @@ export default {
     statusTag(status) {
       if (status === 'done') return 'success'
       if (status === 'failed') return 'danger'
+      if (status === 'downloading') return 'warning'
       if (status === 'running') return 'warning'
       if (status === 'cancelled') return 'info'
       if (status === 'uploading') return 'warning'
@@ -248,7 +252,7 @@ export default {
       return 'info'
     },
     canCancel(row) {
-      return ['pending', 'running', 'cancel_requested'].indexOf(row.status) >= 0
+      return ['pending', 'downloading', 'running', 'cancel_requested'].indexOf(row.status) >= 0
     },
     canRetry(row) {
       return ['failed', 'cancelled'].indexOf(row.status) >= 0
@@ -342,6 +346,22 @@ export default {
         await this.loadTasks()
       } finally {
         this.uploadingIds = this.uploadingIds.filter(id => id !== row.id)
+      }
+    },
+    async cleanupLocalVideos() {
+      await this.$confirm('确认删除下载目录下所有本地视频文件？任务记录、日志、封面和预览不会删除，此操作不可恢复。', '清理本地视频', { type: 'warning' })
+      this.cleaningLocalVideos = true
+      try {
+        const result = await cleanupLocalVideos()
+        const deletedFiles = Number(result.deleted_files || 0)
+        const deletedBytes = formatBytes(Number(result.deleted_bytes || 0))
+        if ((result.errors || []).length) {
+          this.$message.warning(`已删除 ${deletedFiles} 个视频，释放 ${deletedBytes}；部分文件删除失败`)
+        } else {
+          this.$message.success(`已删除 ${deletedFiles} 个本地视频，释放 ${deletedBytes}`)
+        }
+      } finally {
+        this.cleaningLocalVideos = false
       }
     },
     async deleteOneTask(row) {

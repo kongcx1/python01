@@ -52,11 +52,14 @@ DEFAULT_VIDEO_TYPE_THRESHOLD_SECONDS = 600
 MIN_VIDEO_DURATION_SECONDS = int(os.getenv("MIN_VIDEO_DURATION_SECONDS", "10"))
 DEFAULT_MAX_RUNNING_TASKS = 1
 EXTERNAL_JSON_TASK_CONCURRENCY = 10
+EXTERNAL_JSON_PRELOAD_CONCURRENCY = max(
+    1, int(os.getenv("EXTERNAL_JSON_PRELOAD_CONCURRENCY", "5"))
+)
 PREVIEW_SOFT_TIMEOUT_SECONDS = 18
 PREVIEW_HARD_TIMEOUT_SECONDS = 24
 AUTH_STATUS_TIMEOUT_SECONDS = 8
 SPARK_MD5_HELPER = Path(__file__).resolve().parent / "tools" / "spark_md5_file.js"
-SERVER_CODE_VERSION = "2026-07-23-cancel-status-final-v40"
+SERVER_CODE_VERSION = "2026-07-25-local-video-cleanup-v52"
 _server_version_cache: Optional[str] = None
 _db_init_lock = threading.Lock()
 _db_initialized = False
@@ -64,6 +67,21 @@ _db_write_lock = threading.Lock()
 DB_BUSY_TIMEOUT_MS = int(os.getenv("SERVER_DB_BUSY_TIMEOUT_MS", "60000"))
 DB_WRITE_RETRIES = int(os.getenv("SERVER_DB_WRITE_RETRIES", "8"))
 LOGIN_CODE_TTL_SECONDS = int(os.getenv("LOGIN_CODE_TTL_SECONDS", "900"))
+
+
+def _is_windows_path_on_non_windows(value: object) -> bool:
+    if sys.platform.startswith("win"):
+        return False
+    path_text = str(value or "").strip()
+    return bool(re.match(r"^[A-Za-z]:[\\\\/]|^\\\\", path_text))
+
+
+def _server_download_root(config: Optional[dict] = None) -> Path:
+    config = config or _load_config()
+    configured = str(config.get("download_root") or "downloads").strip() or "downloads"
+    if _is_windows_path_on_non_windows(configured):
+        configured = str(os.getenv("SERVER_DOWNLOAD_ROOT") or "downloads")
+    return Path(configured).expanduser().resolve()
 
 
 def _server_version_text() -> str:
@@ -189,6 +207,14 @@ _external_upload_executor = ThreadPoolExecutor(
     max_workers=EXTERNAL_JSON_TASK_CONCURRENCY,
     thread_name_prefix="external-json-task",
 )
+_external_preload_executor = ThreadPoolExecutor(
+    max_workers=EXTERNAL_JSON_PRELOAD_CONCURRENCY,
+    thread_name_prefix="external-json-preload",
+)
+_external_preload_condition = threading.Condition(threading.RLock())
+_external_preload_queue: list[dict] = []
+_external_preload_states: dict[int, dict] = {}
+_external_active_preload_state: Optional[dict] = None
 _task_progress_write_lock = threading.RLock()
 _json_md5_locks: dict[str, threading.Lock] = {}
 _json_md5_locks_lock = threading.Lock()
@@ -905,7 +931,7 @@ def _create_external_upload_task(
 ) -> int:
     config = _load_config()
     now = _utc_now()
-    output_dir = str(config.get("download_root") or "downloads")
+    output_dir = str(_server_download_root(config))
     progress = _external_upload_progress(total, payload, category, limit)
 
     def _insert(conn):
@@ -1505,13 +1531,15 @@ class TaskRunner:
         allowed_ids = set(message_ids) if message_ids else None
         running.allowed_ids = allowed_ids
 
-        root_dir = Path(config.get("download_root", "downloads")).expanduser().resolve()
+        root_dir = _server_download_root(config)
+        saved_output_dir = task.get("output_dir")
         output_dir = (
-            Path(task["output_dir"])
-            if task.get("output_dir")
+            root_dir / channel.replace("/", "_")
+            if _is_windows_path_on_non_windows(saved_output_dir)
+            else Path(str(saved_output_dir)).expanduser().resolve()
+            if saved_output_dir
             else root_dir / channel.replace("/", "_")
         )
-        output_dir = output_dir.expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         output_session = output_dir / "user_session.session"
         if not output_session.exists():
@@ -3100,6 +3128,40 @@ def _file_name_from_url(url: str, fallback: str, default_suffix: str) -> str:
     return name[:160]
 
 
+def _remote_media_headers(url: str) -> dict[str, str]:
+    """Build CDN-friendly headers without leaking task-specific credentials."""
+    headers = {
+        "User-Agent": os.getenv(
+            "REMOTE_MEDIA_USER_AGENT",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36",
+        ),
+        "Accept": "*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        # Video responses must stay byte-for-byte intact for range continuation.
+        "Accept-Encoding": "identity",
+    }
+    host = (urlparse(url).hostname or "").lower()
+    if host.endswith(("xhcdn.com", "ahcdn.com")):
+        referer = os.getenv("REMOTE_MEDIA_REFERER", "https://zh.faphouse.com/").strip()
+        if referer:
+            headers["Referer"] = referer
+        headers["Origin"] = "https://zh.faphouse.com"
+    return headers
+
+
+def _raise_remote_media_http_error(response: requests.Response, file_name: str) -> None:
+    if response.status_code == 403:
+        request_url = str(getattr(getattr(response, "request", None), "url", ""))
+        host = urlparse(response.url).hostname or urlparse(request_url).hostname or "未知主机"
+        raise RuntimeError(
+            f"远程 CDN 拒绝下载 (403)：{file_name} host={host}。"
+            "该下载链接可能已过期、限制服务器出口 IP，或要求重新采集有效地址。"
+        )
+    response.raise_for_status()
+
+
 def _upload_remote_media_once(
     uploader: UploadClient,
     url: str,
@@ -3109,7 +3171,7 @@ def _upload_remote_media_once(
 ) -> dict:
     if not url.startswith(("http://", "https://")):
         raise RuntimeError("远程地址必须是 http/https。")
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = _remote_media_headers(url)
     last_exc: Optional[Exception] = None
     for attempt in range(1, 4):
         try:
@@ -3130,7 +3192,7 @@ def _upload_remote_media_once(
         raise RuntimeError(f"远程媒体下载连接失败：{file_name} {last_exc}")
 
     with resp_ctx as resp:
-        resp.raise_for_status()
+        _raise_remote_media_http_error(resp, file_name)
         content_type = str(resp.headers.get("Content-Type") or "").split(";", 1)[0].strip()
         if not content_type or content_type == "application/octet-stream":
             content_type = "video/mp4" if kind == "video" else "image/jpeg"
@@ -3260,7 +3322,7 @@ def _download_remote_media_to_temp(
         64 * 1024,
         int(os.getenv("REMOTE_MEDIA_RANGE_CHUNK_BYTES", str(512 * 1024))),
     )
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = _remote_media_headers(url)
     temporary_file = destination is None
     if destination is None:
         temp_fd, temp_name = tempfile.mkstemp(suffix=suffix, dir=temp_dir)
@@ -3274,6 +3336,7 @@ def _download_remote_media_to_temp(
     retry_count = 0
     use_chunked_ranges = False
 
+    session = requests.Session()
     try:
         while True:
             downloaded_size = temp_path.stat().st_size if temp_path.exists() else 0
@@ -3295,7 +3358,7 @@ def _download_remote_media_to_temp(
                     )
                 request_headers["Range"] = f"bytes={downloaded_size}-{range_end}"
             try:
-                with requests.get(
+                with session.get(
                     url,
                     stream=True,
                     timeout=(15, 900),
@@ -3308,7 +3371,7 @@ def _download_remote_media_to_temp(
                         downloaded_size = 0
                         expected_size = None
                         use_chunked_ranges = False
-                    response.raise_for_status()
+                    _raise_remote_media_http_error(response, file_name)
                     response_content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip()
                     if response_content_type and response_content_type != "application/octet-stream":
                         content_type = response_content_type
@@ -3362,6 +3425,8 @@ def _download_remote_media_to_temp(
             except OSError:
                 pass
         raise
+    finally:
+        session.close()
 
 
 def _upload_local_media_with_retry(
@@ -3411,8 +3476,9 @@ def _upload_json_video_with_deduplication(
     known_file_size: int = 0,
     on_md5_ready=None,
     local_path: Optional[Path] = None,
+    downloaded_media: Optional[dict] = None,
 ) -> dict:
-    downloaded = _download_remote_media_to_temp(
+    downloaded = downloaded_media or _download_remote_media_to_temp(
         url,
         file_name,
         "video",
@@ -3976,7 +4042,14 @@ def _external_known_md5(task_id: int, url: str) -> tuple[str, int]:
 def _external_json_video_path(task_id: int, index: int, file_name: str) -> Path:
     task = _fetch_task(task_id) or {}
     config = _load_config()
-    output_dir = Path(task.get("output_dir") or config.get("download_root") or "downloads")
+    saved_output_dir = task.get("output_dir")
+    if _is_windows_path_on_non_windows(saved_output_dir):
+        output_dir = _server_download_root(config)
+        _update_task(task_id, output_dir=str(output_dir))
+    elif saved_output_dir:
+        output_dir = Path(str(saved_output_dir)).expanduser().resolve()
+    else:
+        output_dir = _server_download_root(config)
     safe_name = re.sub(r"[^\w.\- ]+", "_", str(file_name or "")).strip(" ._")
     if not safe_name:
         safe_name = f"external_{index}.mp4"
@@ -4038,6 +4111,285 @@ def _record_external_md5_unlocked(
     _update_task(task_id, progress_json=json.dumps(progress, ensure_ascii=False))
 
 
+def _prepare_external_json_video_download(
+    task_id: int,
+    index: int,
+    total: int,
+    item: dict,
+    cancel_event: threading.Event,
+) -> dict:
+    if cancel_event.is_set():
+        return {"index": index, "status": "cancelled"}
+    title = _repair_mojibake_text(str(item.get("title") or "")).strip()
+    if not title:
+        title = str(item.get("pageKey") or item.get("pageUrl") or f"video-{index}")
+    video_url = _external_video_url(item)
+    if not video_url:
+        return {
+            "index": index,
+            "status": "failed",
+            "title": title,
+            "error": "JSON 中缺少 capturedDownload.url。",
+        }
+    file_name = _file_name_from_url(video_url, f"external_{index}.mp4", ".mp4")
+    local_video_path = _external_json_video_path(task_id, index, file_name)
+    _merge_task_progress(
+        task_id,
+        {
+            "stage": "download",
+            "status": f"JSON视频预下载中 {index}/{total}",
+            "files": {
+                str(index): {
+                    "message_id": index,
+                    "file_name": title,
+                    "source_file_name": file_name,
+                    "title": title,
+                    "status": "downloading",
+                    "upload_status": "未上传",
+                }
+            },
+        },
+    )
+    _write_task_log(task_id, f"开始预下载 JSON 视频 {index}/{total}：{title}")
+    _write_task_log(task_id, f"JSON视频下载路径：index={index} path={local_video_path}")
+    _write_task_log(
+        task_id,
+        f"MD5加密源数据：source=JSON视频预下载 index={index} file={file_name} local_path={local_video_path} url={video_url}",
+    )
+    try:
+        known_md5, known_file_size = _external_known_md5(task_id, video_url)
+        downloaded = _download_remote_media_to_temp(
+            video_url,
+            file_name,
+            "video",
+            log_cb=lambda msg: _write_task_log(task_id, msg),
+            known_md5=known_md5,
+            known_file_size=known_file_size,
+            destination=local_video_path,
+        )
+        content_md5 = str(downloaded.get("content_md5") or "").lower()
+        file_size = int(downloaded.get("file_size") or 0)
+        if not content_md5:
+            raise RuntimeError(f"无法计算 JSON 视频 MD5：{file_name}")
+        _record_external_md5(
+            task_id,
+            video_url,
+            file_name,
+            content_md5,
+            file_size,
+            local_video_path,
+        )
+        if downloaded.get("md5_reused"):
+            _write_task_log(
+                task_id,
+                f"MD5加密记录复用：source=JSON视频预下载 index={index} file={file_name} hashed_bytes={file_size} md5={content_md5}",
+            )
+        else:
+            _write_task_log(
+                task_id,
+                f"MD5加密结果：source=JSON视频预下载 index={index} file={file_name} hashed_bytes={file_size} md5={content_md5}",
+            )
+        downloaded["md5_recorded"] = True
+        _write_task_log(
+            task_id,
+            f"JSON视频预下载完成：index={index} file={file_name} bytes={file_size}",
+        )
+        return {
+            "index": index,
+            "status": "ready",
+            "title": title,
+            "file_name": file_name,
+            "downloaded": downloaded,
+        }
+    except Exception as exc:
+        _write_task_log(task_id, f"JSON视频预下载失败：{index} {exc}")
+        return {"index": index, "status": "failed", "title": title, "error": str(exc)}
+
+
+def _external_preload_advance_locked() -> None:
+    global _external_active_preload_state
+    while True:
+        state = _external_active_preload_state
+        if state is None:
+            while _external_preload_queue:
+                candidate = _external_preload_queue.pop(0)
+                if candidate.get("cancel_event").is_set():
+                    candidate["finished"] = True
+                    continue
+                _external_active_preload_state = candidate
+                state = candidate
+                _update_task(int(state["task_id"]), status="downloading", error=None)
+                _write_task_log(
+                    int(state["task_id"]),
+                    f"JSON视频预下载开始：全局预下载线程 {EXTERNAL_JSON_PRELOAD_CONCURRENCY} 个。",
+                )
+                break
+            if state is None:
+                _external_preload_condition.notify_all()
+                return
+
+        if state["cancel_event"].is_set():
+            state["cancelled"] = True
+        while (
+            not state.get("cancelled")
+            and state["next_index"] < len(state["items"])
+            and state["in_flight"] < EXTERNAL_JSON_PRELOAD_CONCURRENCY
+        ):
+            index = state["next_index"] + 1
+            item = state["items"][state["next_index"]]
+            state["next_index"] += 1
+            state["in_flight"] += 1
+            future = _external_preload_executor.submit(
+                _prepare_external_json_video_download,
+                int(state["task_id"]),
+                index,
+                len(state["items"]),
+                item,
+                state["cancel_event"],
+            )
+            future.add_done_callback(
+                lambda done, preload_state=state, item_index=index: _external_preload_done(
+                    preload_state, item_index, done
+                )
+            )
+
+        if (
+            (state.get("cancelled") or state["next_index"] >= len(state["items"]))
+            and state["in_flight"] == 0
+        ):
+            state["finished"] = True
+            _external_preload_condition.notify_all()
+            if state.get("cancelled"):
+                _external_active_preload_state = None
+                continue
+            state["awaiting_upload_start"] = True
+            return
+        _external_preload_condition.notify_all()
+        return
+
+
+def _external_preload_done(state: dict, index: int, future) -> None:
+    try:
+        prepared = future.result()
+    except Exception as exc:
+        prepared = {"index": index, "status": "failed", "error": str(exc)}
+    with _external_preload_condition:
+        state["in_flight"] = max(0, int(state.get("in_flight") or 0) - 1)
+        state["ready"][index] = prepared
+        if prepared.get("status") == "ready":
+            state["downloaded_count"] = int(state.get("downloaded_count") or 0) + 1
+            _merge_task_progress(
+                int(state["task_id"]),
+                {
+                    "stage": "download",
+                    "status": f"JSON视频预下载完成 {state['downloaded_count']}/{len(state['items'])}",
+                    "download_count": {
+                        "done": state["downloaded_count"],
+                        "total": len(state["items"]),
+                    },
+                    "files": {
+                        str(index): {
+                            "message_id": index,
+                            "status": "downloaded",
+                            "upload_status": "未上传",
+                        }
+                    },
+                },
+            )
+        _external_preload_advance_locked()
+
+
+def _register_external_preload(task_id: int, items: list[dict], cancel_event: threading.Event) -> dict:
+    state = {
+        "task_id": task_id,
+        "items": list(items),
+        "cancel_event": cancel_event,
+        "next_index": 0,
+        "in_flight": 0,
+        "ready": {},
+        "downloaded_count": 0,
+        "finished": False,
+        "cancelled": False,
+        "awaiting_upload_start": False,
+        "released": False,
+    }
+    with _external_preload_condition:
+        previous = _external_preload_states.get(task_id)
+        if previous is not None:
+            previous["cancelled"] = True
+        _external_preload_states[task_id] = state
+        _external_preload_queue.append(state)
+        _external_preload_advance_locked()
+        waiting_for_preload = _external_active_preload_state is not state
+    if waiting_for_preload:
+        _merge_task_progress(
+            task_id,
+            {
+                "stage": "download",
+                "status": "JSON视频预下载排队中，等待前序任务完成预下载。",
+            },
+        )
+        _write_task_log(
+            task_id,
+            "JSON视频预下载排队中：等待前序任务完成全部预下载。",
+        )
+    return state
+
+
+def _wait_for_external_preload(state: dict, index: int) -> dict:
+    with _external_preload_condition:
+        while True:
+            prepared = state["ready"].pop(index, None)
+            if prepared is not None:
+                return prepared
+            if state.get("cancelled") or state["cancel_event"].is_set():
+                return {"index": index, "status": "cancelled"}
+            if state.get("finished"):
+                return {
+                    "index": index,
+                    "status": "failed",
+                    "error": "预下载队列提前结束。",
+                }
+            _external_preload_condition.wait(timeout=0.5)
+
+
+def _wait_for_external_preload_complete(state: dict) -> bool:
+    with _external_preload_condition:
+        while not state.get("finished"):
+            if state.get("cancelled") or state["cancel_event"].is_set():
+                return False
+            _external_preload_condition.wait(timeout=0.5)
+        return not state.get("cancelled") and not state["cancel_event"].is_set()
+
+
+def _release_external_preload_slot(state: dict) -> None:
+    global _external_active_preload_state
+    with _external_preload_condition:
+        state["awaiting_upload_start"] = False
+        state["released"] = True
+        if _external_active_preload_state is state:
+            _external_active_preload_state = None
+        _external_preload_advance_locked()
+
+
+def _cancel_external_preload(task_id: int) -> None:
+    with _external_preload_condition:
+        state = _external_preload_states.get(task_id)
+        if state is None:
+            return
+        state["cancelled"] = True
+        if state in _external_preload_queue:
+            _external_preload_queue.remove(state)
+            state["finished"] = True
+        _external_preload_advance_locked()
+
+
+def _unregister_external_preload(task_id: int, state: dict) -> None:
+    with _external_preload_condition:
+        if _external_preload_states.get(task_id) is state:
+            _external_preload_states.pop(task_id, None)
+
+
 def _start_external_video_library_upload(
     req: ExternalVideoLibraryUploadRequest,
     task_id: Optional[int] = None,
@@ -4065,7 +4417,7 @@ def _start_external_video_library_upload(
     action = "任务重试" if is_retry else "任务开始"
     _write_task_log(
         task_id,
-        f"JSON视频上传{action}：共 {len(items)} 条，等待全局任务执行位。",
+        f"JSON视频上传{action}：共 {len(items)} 条，等待 pending 预下载缓冲位（最多 {EXTERNAL_JSON_TASK_CONCURRENCY} 个任务）。",
     )
 
     job_id = uuid.uuid4().hex
@@ -4084,6 +4436,7 @@ def _start_external_video_library_upload(
             "failed": 0,
             "items": [],
         }
+    preload_state = _register_external_preload(task_id, items, cancel_event)
 
     def _worker() -> None:
         try:
@@ -4097,23 +4450,44 @@ def _start_external_video_library_upload(
                     "items": [],
                 }
             else:
-                with _external_upload_jobs_lock:
-                    if job_id in _external_upload_jobs:
-                        _external_upload_jobs[job_id].update(
-                            {"status": "running", "updated_at": _utc_now()}
-                        )
-                _update_task(task_id, status="running", error=None)
-                _merge_task_progress(
-                    task_id,
-                    {"stage": "upload", "status": "JSON视频上传开始执行"},
-                )
                 _write_task_log(
                     task_id,
-                    f"JSON视频上传开始执行：全局并发上限 {EXTERNAL_JSON_TASK_CONCURRENCY} 个任务。",
+                    "JSON视频上传任务等待预下载完成，预下载中的任务显示为 downloading。",
                 )
-                result = _process_external_video_library_upload(
-                    req, job_id, task_id, cancel_event
-                )
+                preload_completed = _wait_for_external_preload_complete(preload_state)
+                if not preload_completed:
+                    result = {
+                        "task_id": task_id,
+                        "total": len(items),
+                        "success": 0,
+                        "skipped": 0,
+                        "failed": 0,
+                        "items": [],
+                    }
+                else:
+                    with _external_upload_jobs_lock:
+                        if job_id in _external_upload_jobs:
+                            _external_upload_jobs[job_id].update(
+                                {"status": "running", "updated_at": _utc_now()}
+                            )
+                    _update_task(task_id, status="running", error=None)
+                    _merge_task_progress(
+                        task_id,
+                        {"stage": "upload", "status": "JSON视频预下载完成，开始上传"},
+                    )
+                    _write_task_log(
+                        task_id,
+                        f"JSON视频上传开始执行：全局并发上限 {EXTERNAL_JSON_TASK_CONCURRENCY} 个任务。",
+                    )
+                    _release_external_preload_slot(preload_state)
+                    result = _process_external_video_library_upload(
+                        req,
+                        job_id,
+                        task_id,
+                        cancel_event,
+                        items=items,
+                        preload_state=preload_state,
+                    )
             if cancel_event.is_set():
                 result.update({"job_id": job_id, "task_id": task_id, "status": "cancelled", "updated_at": _utc_now()})
                 _merge_task_progress(task_id, {"stage": "upload", "status": "JSON视频上传已取消"})
@@ -4162,6 +4536,7 @@ def _start_external_video_library_upload(
             _external_upload_jobs[job_id] = result
             if _external_upload_cancel_events.get(task_id) is cancel_event:
                 _external_upload_cancel_events.pop(task_id, None)
+        _unregister_external_preload(task_id, preload_state)
 
     _external_upload_executor.submit(_worker)
     return {"job_id": job_id, "task_id": task_id, "status": "pending"}
@@ -4322,12 +4697,20 @@ def get_external_video_library_progress(task_id: int) -> dict:
 
 
 def _request_external_upload_cancel(task_id: int) -> bool:
+    found = False
     with _external_upload_jobs_lock:
         cancel_event = _external_upload_cancel_events.get(task_id)
-    if cancel_event is None:
-        return False
-    cancel_event.set()
-    return True
+        if cancel_event is not None:
+            cancel_event.set()
+            found = True
+            for job in _external_upload_jobs.values():
+                if int(job.get("task_id") or 0) != task_id:
+                    continue
+                if job.get("status") in ("pending", "running"):
+                    job.update({"status": "cancelled", "updated_at": _utc_now()})
+    if found:
+        _cancel_external_preload(task_id)
+    return found
 
 
 def _process_external_video_library_upload(
@@ -4335,6 +4718,8 @@ def _process_external_video_library_upload(
     job_id: str,
     task_id: int,
     cancel_event: Optional[threading.Event] = None,
+    items: Optional[list[dict]] = None,
+    preload_state: Optional[dict] = None,
 ) -> dict:
     config = _load_config()
     base_url = str(config.get("upload_base_url") or "").strip()
@@ -4357,22 +4742,29 @@ def _process_external_video_library_upload(
     if not uploader.token and uploader.account and uploader.password:
         uploader._auth_headers()
 
-    items = _external_library_items(req.payload)
-    if req.limit is not None:
-        items = items[: max(0, int(req.limit))]
+    if items is None:
+        items = _external_library_items(req.payload)
+        if req.limit is not None:
+            items = items[: max(0, int(req.limit))]
     category = str(
         req.category or config.get("movie_category_default") or "纪录片"
     ).strip() or "纪录片"
     results: list[dict] = []
     success = 0
     skipped = 0
+    downloaded_count = 0
     with _external_upload_jobs_lock:
         if job_id in _external_upload_jobs:
             _external_upload_jobs[job_id].update(
                 {"total": len(items), "success": 0, "skipped": 0, "failed": 0, "items": [], "updated_at": _utc_now()}
             )
 
-    def _process_item(index: int, item: dict) -> dict:
+    def _process_item(
+        index: int,
+        item: dict,
+        predownloaded_media: Optional[dict] = None,
+        predownload_error: str = "",
+    ) -> dict:
         if cancel_event is not None and cancel_event.is_set():
             return {"index": index, "status": "cancelled"}
         title = _repair_mojibake_text(str(item.get("title") or "")).strip()
@@ -4396,7 +4788,7 @@ def _process_external_video_library_upload(
                 "stage": "upload",
                 "status": f"JSON视频上传中 {index}/{len(items)}",
                 "upload_count": {"done": len(results), "total": len(items)},
-                "download_count": {"done": len(results), "total": len(items)},
+                "download_count": {"done": downloaded_count, "total": len(items)},
                 "files": {
                     str(index): {
                         "message_id": index,
@@ -4414,21 +4806,29 @@ def _process_external_video_library_upload(
         )
         _write_task_log(task_id, f"开始上传 JSON 视频 {index}/{len(items)}：{title}")
         try:
+            if predownload_error:
+                raise RuntimeError(predownload_error)
             if not video_url:
                 raise RuntimeError("JSON 中缺少 capturedDownload.url。")
             file_name = _file_name_from_url(video_url, f"external_{index}.mp4", ".mp4")
             local_video_path = _external_json_video_path(task_id, index, file_name)
-            _write_task_log(
-                task_id,
-                f"JSON视频下载路径：index={index} path={local_video_path}",
-            )
-            _write_task_log(
-                task_id,
-                f"MD5加密源数据：source=JSON视频上传 index={index} file={file_name} local_path={local_video_path} url={video_url}",
-            )
+            if predownloaded_media is None:
+                _write_task_log(
+                    task_id,
+                    f"JSON视频下载路径：index={index} path={local_video_path}",
+                )
+                _write_task_log(
+                    task_id,
+                    f"MD5加密源数据：source=JSON视频上传 index={index} file={file_name} local_path={local_video_path} url={video_url}",
+                )
             known_md5, known_file_size = _external_known_md5(task_id, video_url)
+            predownload_md5_recorded = bool(
+                predownloaded_media and predownloaded_media.get("md5_recorded")
+            )
 
             def _on_md5_ready(value: str, file_size: int, reused: bool) -> None:
+                if predownload_md5_recorded:
+                    return
                 _record_external_md5(
                     task_id,
                     video_url,
@@ -4457,6 +4857,7 @@ def _process_external_video_library_upload(
                 known_file_size=known_file_size,
                 on_md5_ready=_on_md5_ready,
                 local_path=local_video_path,
+                downloaded_media=predownloaded_media,
             )
             video_id = int(video_upload.get("upload_id") or 0)
             content_md5 = str(video_upload.get("content_md5") or "").lower()
@@ -4580,7 +4981,7 @@ def _process_external_video_library_upload(
                 "stage": "upload",
                 "status": f"JSON视频上传中 {completed}/{len(items)}",
                 "upload_count": {"done": completed, "total": len(items)},
-                "download_count": {"done": completed, "total": len(items)},
+                "download_count": {"done": downloaded_count, "total": len(items)},
                 "files": {
                     str(row.get("index")): {
                         "message_id": row.get("index"),
@@ -4623,34 +5024,33 @@ def _process_external_video_library_upload(
                     }
                 )
 
-    concurrency = 1
-    _write_task_log(task_id, "JSON视频上传模式：逐条顺序处理。")
-    item_iterator = iter(enumerate(items, start=1))
-    pending: dict[object, int] = {}
-    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="json-video-upload") as executor:
-        def _submit_one() -> bool:
-            if cancel_event is not None and cancel_event.is_set():
-                return False
-            try:
-                index, item = next(item_iterator)
-            except StopIteration:
-                return False
-            pending[executor.submit(_process_item, index, item)] = index
-            return True
-
-        for _ in range(min(concurrency, len(items))):
-            if not _submit_one():
+    owns_preload_state = preload_state is None
+    if preload_state is None:
+        preload_state = _register_external_preload(
+            task_id, items, cancel_event or threading.Event()
+        )
+    _write_task_log(
+        task_id,
+        f"JSON视频上传模式：全局预下载线程 {EXTERNAL_JSON_PRELOAD_CONCURRENCY} 个，影片按顺序逐条上传。",
+    )
+    try:
+        for index, item in enumerate(items, start=1):
+            prepared = _wait_for_external_preload(preload_state, index)
+            if prepared.get("status") == "cancelled":
                 break
-        while pending:
-            future = next(as_completed(pending))
-            pending.pop(future, None)
-            try:
-                row = future.result()
-            except Exception as exc:
-                row = {"index": 0, "status": "failed", "error": str(exc)}
+            with _external_preload_condition:
+                downloaded_count = int(preload_state.get("downloaded_count") or 0)
+            row = _process_item(
+                index,
+                item,
+                predownloaded_media=prepared.get("downloaded"),
+                predownload_error=str(prepared.get("error") or ""),
+            )
             if row.get("status") != "cancelled":
                 _record_item_result(row)
-            _submit_one()
+    finally:
+        if owns_preload_state:
+            _unregister_external_preload(task_id, preload_state)
 
     return _repair_mojibake_value(
         {
@@ -5767,9 +6167,12 @@ def cancel_task(task_id: int) -> dict:
         return {"id": task_id, "status": task["status"]}
     if str(task.get("channel") or "") == "JSON视频上传":
         if _request_external_upload_cancel(task_id):
-            _update_task(task_id, status="cancel_requested")
-            _write_task_log(task_id, "已请求取消 JSON 视频上传。")
-            return {"id": task_id, "status": "cancel_requested"}
+            _update_task(task_id, status="cancelled", error=None)
+            _write_task_log(
+                task_id,
+                "已取消 JSON 视频上传，正在等待当前网络请求结束。",
+            )
+            return {"id": task_id, "status": "cancelled"}
         _update_task(task_id, status="cancelled")
         _write_task_log(task_id, "JSON 视频上传未在运行，已标记为取消。")
         return {"id": task_id, "status": "cancelled"}
@@ -5858,6 +6261,49 @@ def delete_task(task_id: int) -> dict:
         raise HTTPException(status_code=400, detail="任务运行中，请先取消")
     _delete_task(task_id)
     return {"id": task_id, "status": "deleted"}
+
+
+@app.post("/downloads/local-videos/cleanup", dependencies=[Depends(_require_token)])
+def cleanup_local_downloaded_videos() -> dict:
+    active_statuses = ("pending", "downloading", "running", "uploading", "cancel_requested")
+    placeholders = ",".join("?" for _ in active_statuses)
+    with _db_connect() as conn:
+        active_count = int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM tasks WHERE status IN ({placeholders})",
+                active_statuses,
+            ).fetchone()[0]
+        )
+    if active_count:
+        raise HTTPException(
+            status_code=409,
+            detail=f"当前有 {active_count} 个任务仍在运行或等待，不能清理本地视频。",
+        )
+
+    root_dir = _server_download_root(_load_config())
+    if not root_dir.exists():
+        return {"root_dir": str(root_dir), "deleted_files": 0, "deleted_bytes": 0, "errors": []}
+    video_suffixes = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".m4v", ".ts"}
+    deleted_files = 0
+    deleted_bytes = 0
+    errors: list[str] = []
+    for path in root_dir.rglob("*"):
+        try:
+            if not path.is_file() or path.suffix.lower() not in video_suffixes:
+                continue
+            size = path.stat().st_size
+            path.unlink()
+            deleted_files += 1
+            deleted_bytes += size
+        except OSError as exc:
+            if len(errors) < 20:
+                errors.append(f"{path}: {exc}")
+    return {
+        "root_dir": str(root_dir),
+        "deleted_files": deleted_files,
+        "deleted_bytes": deleted_bytes,
+        "errors": errors,
+    }
 
 
 @app.post("/tasks/clean_stale", dependencies=[Depends(_require_token)])
