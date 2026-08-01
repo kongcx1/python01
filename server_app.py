@@ -59,7 +59,7 @@ PREVIEW_SOFT_TIMEOUT_SECONDS = 18
 PREVIEW_HARD_TIMEOUT_SECONDS = 24
 AUTH_STATUS_TIMEOUT_SECONDS = 8
 SPARK_MD5_HELPER = Path(__file__).resolve().parent / "tools" / "spark_md5_file.js"
-SERVER_CODE_VERSION = "2026-07-25-local-video-cleanup-v52"
+SERVER_CODE_VERSION = "2026-07-26-json-multi-preload-slots-v58"
 _server_version_cache: Optional[str] = None
 _db_init_lock = threading.Lock()
 _db_initialized = False
@@ -214,7 +214,14 @@ _external_preload_executor = ThreadPoolExecutor(
 _external_preload_condition = threading.Condition(threading.RLock())
 _external_preload_queue: list[dict] = []
 _external_preload_states: dict[int, dict] = {}
-_external_active_preload_state: Optional[dict] = None
+_external_active_preload_states: list[dict] = []
+
+
+def _is_current_external_upload(task_id: int, cancel_event: threading.Event) -> bool:
+    with _external_upload_jobs_lock:
+        return _external_upload_cancel_events.get(task_id) is cancel_event
+
+
 _task_progress_write_lock = threading.RLock()
 _json_md5_locks: dict[str, threading.Lock] = {}
 _json_md5_locks_lock = threading.Lock()
@@ -380,6 +387,10 @@ def _load_config() -> dict:
     config.setdefault("video_meta_url", DEFAULT_VIDEO_META_URL)
     config.setdefault("movie_create_url", DEFAULT_MOVIE_CREATE_URL)
     config.setdefault("video_type_threshold_seconds", DEFAULT_VIDEO_TYPE_THRESHOLD_SECONDS)
+    config.setdefault("video_trim_head_seconds", 0)
+    config.setdefault("trim_json_video_upload", False)
+    config.setdefault("trim_telegram_direct_upload", False)
+    config.setdefault("trim_local_file_upload", False)
     config.setdefault("min_video_duration_seconds", MIN_VIDEO_DURATION_SECONDS)
     config.setdefault("max_running_tasks", DEFAULT_MAX_RUNNING_TASKS)
     return config
@@ -390,6 +401,13 @@ def _coerce_non_negative_int(value: object, default: int) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return default
+
+
+def _trim_head_seconds_for(config: dict, source_flag: str) -> int:
+    enabled = str(config.get(source_flag) or "").strip().lower()
+    if enabled not in ("1", "true", "yes", "on"):
+        return 0
+    return _coerce_non_negative_int(config.get("video_trim_head_seconds"), 0)
 
 
 def _save_config(config: dict) -> None:
@@ -777,7 +795,13 @@ def _fetch_next_pending() -> Optional[dict]:
     with _db_connect() as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT * FROM tasks WHERE status='pending' ORDER BY id LIMIT 1"
+            """
+            SELECT * FROM tasks
+            WHERE status='pending' AND channel != ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            ("JSON视频上传",),
         ).fetchone()
     return dict(row) if row else None
 
@@ -1527,7 +1551,9 @@ class TaskRunner:
         channel = task["channel"]
         message_ids = json.loads(task["message_ids"] or "[]")
         if not message_ids and not (task.get("start_date") or task.get("end_date")):
-            raise RuntimeError("ä»»åŠ¡éœ€è¦ message_ids æˆ–è€…æ—¥æœŸèŒƒå›´ã€‚")
+            raise RuntimeError(
+                "任务缺少下载范围：请至少提供 message_ids，或设置开始日期/结束日期。"
+            )
         allowed_ids = set(message_ids) if message_ids else None
         running.allowed_ids = allowed_ids
 
@@ -1872,6 +1898,9 @@ class TaskRunner:
             meta_url=config.get("video_meta_url"),
             movie_create_url=config.get("movie_create_url"),
             movie_category_default=config.get("movie_category_default"),
+            trim_head_seconds=_trim_head_seconds_for(
+                config, "trim_telegram_direct_upload"
+            ),
             debug=True,
             log_cb=lambda msg: _write_task_log(int(task["id"]), msg),
             progress_cb=upload_progress_cb,
@@ -2533,6 +2562,9 @@ class TaskRunner:
             meta_url=config.get("video_meta_url"),
             movie_create_url=config.get("movie_create_url"),
             movie_category_default=config.get("movie_category_default"),
+            trim_head_seconds=_trim_head_seconds_for(
+                config, "trim_local_file_upload"
+            ),
             debug=True,
             log_cb=lambda msg: _write_task_log(int(task["id"]), msg),
             progress_cb=lambda data: _merge_task_progress(
@@ -3005,6 +3037,10 @@ class ConfigUpdateRequest(BaseModel):
     upload_password: Optional[str] = None
     upload_api_token: Optional[str] = None
     video_type_threshold_seconds: Optional[int] = None
+    video_trim_head_seconds: Optional[int] = None
+    trim_json_video_upload: Optional[bool] = None
+    trim_telegram_direct_upload: Optional[bool] = None
+    trim_local_file_upload: Optional[bool] = None
     min_video_duration_seconds: Optional[int] = None
 
 
@@ -3637,7 +3673,10 @@ def _best_preview_cache_image(output_dir: Path, message_id: object) -> Optional[
 @app.post("/tasks", dependencies=[Depends(_require_token)])
 def create_task(req: TaskRequest) -> dict:
     if not req.message_ids and not (req.start_date or req.end_date):
-        raise HTTPException(status_code=400, detail="å¿…é¡»æä¾› message_ids æˆ–æ—¥æœŸèŒƒå›´ã€‚")
+        raise HTTPException(
+            status_code=400,
+            detail="必须提供 message_ids，或设置开始日期/结束日期。",
+        )
     config = _load_config()
     if req.api_id is not None:
         config["telegram_api_id"] = str(req.api_id).strip()
@@ -3899,6 +3938,10 @@ def get_config() -> dict:
         "upload_password": config.get("upload_password"),
         "upload_api_token": config.get("upload_api_token"),
         "video_type_threshold_seconds": config.get("video_type_threshold_seconds"),
+        "video_trim_head_seconds": config.get("video_trim_head_seconds"),
+        "trim_json_video_upload": config.get("trim_json_video_upload"),
+        "trim_telegram_direct_upload": config.get("trim_telegram_direct_upload"),
+        "trim_local_file_upload": config.get("trim_local_file_upload"),
         "min_video_duration_seconds": config.get("min_video_duration_seconds"),
     }
 
@@ -3930,6 +3973,17 @@ def update_config(req: ConfigUpdateRequest) -> dict:
             req.video_type_threshold_seconds,
             DEFAULT_VIDEO_TYPE_THRESHOLD_SECONDS,
         )
+    if req.video_trim_head_seconds is not None:
+        config["video_trim_head_seconds"] = _coerce_non_negative_int(
+            req.video_trim_head_seconds,
+            0,
+        )
+    if req.trim_json_video_upload is not None:
+        config["trim_json_video_upload"] = bool(req.trim_json_video_upload)
+    if req.trim_telegram_direct_upload is not None:
+        config["trim_telegram_direct_upload"] = bool(req.trim_telegram_direct_upload)
+    if req.trim_local_file_upload is not None:
+        config["trim_local_file_upload"] = bool(req.trim_local_file_upload)
     if req.min_video_duration_seconds is not None:
         config["min_video_duration_seconds"] = _coerce_non_negative_int(
             req.min_video_duration_seconds,
@@ -3946,6 +4000,10 @@ def update_config(req: ConfigUpdateRequest) -> dict:
         "upload_password": config.get("upload_password"),
         "upload_api_token": config.get("upload_api_token"),
         "video_type_threshold_seconds": config.get("video_type_threshold_seconds"),
+        "video_trim_head_seconds": config.get("video_trim_head_seconds"),
+        "trim_json_video_upload": config.get("trim_json_video_upload"),
+        "trim_telegram_direct_upload": config.get("trim_telegram_direct_upload"),
+        "trim_local_file_upload": config.get("trim_local_file_upload"),
         "min_video_duration_seconds": config.get("min_video_duration_seconds"),
     }
 
@@ -4207,38 +4265,45 @@ def _prepare_external_json_video_download(
 
 
 def _external_preload_advance_locked() -> None:
-    global _external_active_preload_state
-    while True:
-        state = _external_active_preload_state
-        if state is None:
-            while _external_preload_queue:
-                candidate = _external_preload_queue.pop(0)
-                if candidate.get("cancel_event").is_set():
-                    candidate["finished"] = True
-                    continue
-                _external_active_preload_state = candidate
-                state = candidate
-                _update_task(int(state["task_id"]), status="downloading", error=None)
-                _write_task_log(
-                    int(state["task_id"]),
-                    f"JSON视频预下载开始：全局预下载线程 {EXTERNAL_JSON_PRELOAD_CONCURRENCY} 个。",
-                )
-                break
-            if state is None:
-                _external_preload_condition.notify_all()
-                return
+    # A preload slot belongs to one JSON task. Each active task downloads one
+    # video at a time, so the global executor limit is shared fairly between tasks.
+    while len(_external_active_preload_states) < EXTERNAL_JSON_PRELOAD_CONCURRENCY:
+        candidate = None
+        while _external_preload_queue:
+            candidate = _external_preload_queue.pop(0)
+            if candidate.get("cancel_event").is_set():
+                candidate["cancelled"] = True
+                candidate["finished"] = True
+                candidate = None
+                continue
+            break
+        if candidate is None:
+            break
+        _external_active_preload_states.append(candidate)
+        _update_task(int(candidate["task_id"]), status="downloading", error=None)
+        _write_task_log(
+            int(candidate["task_id"]),
+            f"JSON视频预下载开始：全局预下载槽位 {EXTERNAL_JSON_PRELOAD_CONCURRENCY} 个。",
+        )
 
+    for state in list(_external_active_preload_states):
         if state["cancel_event"].is_set():
             state["cancelled"] = True
-        while (
+
+        if state.get("cancelled") and state["in_flight"] == 0:
+            state["finished"] = True
+            _external_active_preload_states.remove(state)
+            continue
+
+        if (
             not state.get("cancelled")
             and state["next_index"] < len(state["items"])
-            and state["in_flight"] < EXTERNAL_JSON_PRELOAD_CONCURRENCY
+            and state["in_flight"] == 0
         ):
             index = state["next_index"] + 1
             item = state["items"][state["next_index"]]
             state["next_index"] += 1
-            state["in_flight"] += 1
+            state["in_flight"] = 1
             future = _external_preload_executor.submit(
                 _prepare_external_json_video_download,
                 int(state["task_id"]),
@@ -4253,19 +4318,17 @@ def _external_preload_advance_locked() -> None:
                 )
             )
 
-        if (
-            (state.get("cancelled") or state["next_index"] >= len(state["items"]))
-            and state["in_flight"] == 0
-        ):
+        if state["next_index"] >= len(state["items"]) and state["in_flight"] == 0:
             state["finished"] = True
-            _external_preload_condition.notify_all()
-            if state.get("cancelled"):
-                _external_active_preload_state = None
-                continue
             state["awaiting_upload_start"] = True
-            return
-        _external_preload_condition.notify_all()
+
+    if (
+        len(_external_active_preload_states) < EXTERNAL_JSON_PRELOAD_CONCURRENCY
+        and _external_preload_queue
+    ):
+        _external_preload_advance_locked()
         return
+    _external_preload_condition.notify_all()
 
 
 def _external_preload_done(state: dict, index: int, future) -> None:
@@ -4317,10 +4380,12 @@ def _register_external_preload(task_id: int, items: list[dict], cancel_event: th
         previous = _external_preload_states.get(task_id)
         if previous is not None:
             previous["cancelled"] = True
+            previous["cancel_event"].set()
+            _external_preload_condition.notify_all()
         _external_preload_states[task_id] = state
         _external_preload_queue.append(state)
         _external_preload_advance_locked()
-        waiting_for_preload = _external_active_preload_state is not state
+        waiting_for_preload = state not in _external_active_preload_states
     if waiting_for_preload:
         _merge_task_progress(
             task_id,
@@ -4363,12 +4428,11 @@ def _wait_for_external_preload_complete(state: dict) -> bool:
 
 
 def _release_external_preload_slot(state: dict) -> None:
-    global _external_active_preload_state
     with _external_preload_condition:
         state["awaiting_upload_start"] = False
         state["released"] = True
-        if _external_active_preload_state is state:
-            _external_active_preload_state = None
+        if state in _external_active_preload_states:
+            _external_active_preload_states.remove(state)
         _external_preload_advance_locked()
 
 
@@ -4388,6 +4452,11 @@ def _unregister_external_preload(task_id: int, state: dict) -> None:
     with _external_preload_condition:
         if _external_preload_states.get(task_id) is state:
             _external_preload_states.pop(task_id, None)
+        if state in _external_preload_queue:
+            _external_preload_queue.remove(state)
+        if state in _external_active_preload_states:
+            _external_active_preload_states.remove(state)
+        _external_preload_advance_locked()
 
 
 def _start_external_video_library_upload(
@@ -4488,7 +4557,18 @@ def _start_external_video_library_upload(
                         items=items,
                         preload_state=preload_state,
                     )
-            if cancel_event.is_set():
+            if not _is_current_external_upload(task_id, cancel_event):
+                # A retry replaced this worker. Its result must not overwrite the
+                # newer task's pending/downloading/running status.
+                result.update(
+                    {
+                        "job_id": job_id,
+                        "task_id": task_id,
+                        "status": "superseded",
+                        "updated_at": _utc_now(),
+                    }
+                )
+            elif cancel_event.is_set():
                 result.update({"job_id": job_id, "task_id": task_id, "status": "cancelled", "updated_at": _utc_now()})
                 _merge_task_progress(task_id, {"stage": "upload", "status": "JSON视频上传已取消"})
                 _update_task(task_id, status="cancelled", error=None)
@@ -4530,8 +4610,11 @@ def _start_external_video_library_upload(
                 "failed": 1,
                 "items": [],
             }
-            _update_task(task_id, status="failed", error=str(exc))
-            _write_task_log(task_id, f"JSON视频上传失败: {exc}")
+            if _is_current_external_upload(task_id, cancel_event):
+                _update_task(task_id, status="failed", error=str(exc))
+                _write_task_log(task_id, f"JSON视频上传失败: {exc}")
+            else:
+                result["status"] = "superseded"
         with _external_upload_jobs_lock:
             _external_upload_jobs[job_id] = result
             if _external_upload_cancel_events.get(task_id) is cancel_event:
@@ -4733,6 +4816,7 @@ def _process_external_video_library_upload(
         meta_url=config.get("video_meta_url"),
         movie_create_url=config.get("movie_create_url"),
         movie_category_default=config.get("movie_category_default"),
+        trim_head_seconds=_trim_head_seconds_for(config, "trim_json_video_upload"),
         debug=True,
         log_cb=lambda msg: _write_task_log(task_id, msg),
     )

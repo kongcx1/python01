@@ -53,6 +53,15 @@
               <el-input-number v-model="form.shortThreshold" :min="0" controls-position="right" @change="saveLocalForm" />
               <span class="muted unit-text">秒</span>
             </el-form-item>
+            <el-form-item label="片头裁剪">
+              <el-input-number v-model="form.trimHeadSeconds" :min="0" :precision="0" controls-position="right" @change="saveLocalForm" />
+              <span class="muted unit-text">秒，0 表示不裁剪</span>
+            </el-form-item>
+            <el-form-item label="裁剪适用上传">
+              <el-checkbox v-model="form.trimJsonVideoUpload" @change="saveLocalForm">JSON 视频</el-checkbox>
+              <el-checkbox v-model="form.trimTelegramDirectUpload" @change="saveLocalForm">Telegram 直传</el-checkbox>
+              <el-checkbox v-model="form.trimLocalFileUpload" @change="saveLocalForm">本地文件上传</el-checkbox>
+            </el-form-item>
             <el-form-item label="过滤时长">
               <el-input-number v-model="form.minDuration" :min="0" controls-position="right" @change="saveLocalForm" />
               <span class="muted unit-text">秒以下不展示/不上传</span>
@@ -111,6 +120,18 @@ export default {
         if (data.video_type_threshold_seconds !== undefined && data.video_type_threshold_seconds !== null) {
           this.form.shortThreshold = Number(data.video_type_threshold_seconds)
         }
+        if (data.video_trim_head_seconds !== undefined && data.video_trim_head_seconds !== null) {
+          this.form.trimHeadSeconds = Number(data.video_trim_head_seconds)
+        }
+        if (data.trim_json_video_upload !== undefined && data.trim_json_video_upload !== null) {
+          this.form.trimJsonVideoUpload = Boolean(data.trim_json_video_upload)
+        }
+        if (data.trim_telegram_direct_upload !== undefined && data.trim_telegram_direct_upload !== null) {
+          this.form.trimTelegramDirectUpload = Boolean(data.trim_telegram_direct_upload)
+        }
+        if (data.trim_local_file_upload !== undefined && data.trim_local_file_upload !== null) {
+          this.form.trimLocalFileUpload = Boolean(data.trim_local_file_upload)
+        }
         if (data.min_video_duration_seconds !== undefined && data.min_video_duration_seconds !== null) {
           this.form.minDuration = Number(data.min_video_duration_seconds)
         }
@@ -134,6 +155,10 @@ export default {
           upload_password: this.form.uploadPassword,
           upload_api_token: this.form.uploadApiToken,
           video_type_threshold_seconds: Number(this.form.shortThreshold || 0),
+          video_trim_head_seconds: Number(this.form.trimHeadSeconds || 0),
+          trim_json_video_upload: Boolean(this.form.trimJsonVideoUpload),
+          trim_telegram_direct_upload: Boolean(this.form.trimTelegramDirectUpload),
+          trim_local_file_upload: Boolean(this.form.trimLocalFileUpload),
           min_video_duration_seconds: Number(this.form.minDuration || 0)
         })
         this.saveLocalForm()

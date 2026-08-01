@@ -307,6 +307,9 @@ def is_filtered_caption(text: str) -> bool:
         "全网最大信誉台",
         "南宫娱乐千万押金首选品牌",
         "9999掀翻天花板",
+        "1820587com",
+        "qs1996cc",
+        "qs3055cc",
     )
     if any(keyword in normalized for keyword in strong_keywords):
         return True
@@ -321,6 +324,8 @@ def is_filtered_caption(text: str) -> bool:
         ("u投首选综合平台", "东南亚盘总首选权威"),
         ("凭什么别人能翻盘", "pp电子", "满格神话"),
         ("9999", "50000倍", "10u", "巨额回报"),
+        ("182体育", "首存日存彩金", "高端嫩模"),
+        ("球速体育", "首存日存彩金", "高端嫩模"),
     )
     return any(all(keyword in normalized for keyword in group) for group in keyword_groups)
 

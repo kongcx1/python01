@@ -116,6 +116,7 @@ class UploadClient:
         meta_url: Optional[str] = None,
         movie_create_url: Optional[str] = None,
         movie_category_default: Optional[str] = None,
+        trim_head_seconds: int = 0,
         debug: bool = False,
         log_cb: Optional[Callable[[str], None]] = None,
         progress_cb: Optional[Callable[[dict], None]] = None,
@@ -128,6 +129,10 @@ class UploadClient:
         self.movie_category_default = (
             movie_category_default.strip() if movie_category_default else ""
         )
+        try:
+            self.trim_head_seconds = max(0, int(trim_head_seconds or 0))
+        except (TypeError, ValueError):
+            self.trim_head_seconds = 0
         self.debug = debug
         self.log_cb = log_cb
         self.progress_cb = progress_cb
@@ -242,16 +247,27 @@ class UploadClient:
         else:
             url = f"{self.base_url}/api/amazon/video/uploadFinish"
         headers = self._auth_headers()
-        payloads = [
-            {"ID": upload_id, "Token": upload_url},
-            {"ID": upload_id, "token": upload_url},
-            {"data": {"ID": upload_id, "Token": upload_url}, "ret": "OK"},
-            {"data": {"ID": upload_id, "token": upload_url}},
-            {"id": upload_id, "token": upload_url},
-            {"id": upload_id},
-            {"ID": upload_id},
-            {"data": {"id": upload_id}},
-        ]
+        trim_payload = (
+            {"trim_head_seconds": self.trim_head_seconds}
+            if kind == "video" and self.trim_head_seconds > 0
+            else {}
+        )
+        if trim_payload and self.debug:
+            self._log(f"视频片头裁剪：{self.trim_head_seconds} 秒")
+        payloads = []
+        if trim_payload:
+            # The new API contract uses lowercase id and only needs the trim value.
+            payloads.append({"id": upload_id, **trim_payload})
+        payloads.extend([
+            {"ID": upload_id, "Token": upload_url, **trim_payload},
+            {"ID": upload_id, "token": upload_url, **trim_payload},
+            {"data": {"ID": upload_id, "Token": upload_url}, "ret": "OK", **trim_payload},
+            {"data": {"ID": upload_id, "token": upload_url}, **trim_payload},
+            {"id": upload_id, "token": upload_url, **trim_payload},
+            {"id": upload_id, **trim_payload},
+            {"ID": upload_id, **trim_payload},
+            {"data": {"id": upload_id}, **trim_payload},
+        ])
         last_exc = None
         for payload in payloads:
             try:
